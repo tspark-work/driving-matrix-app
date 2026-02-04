@@ -14,7 +14,6 @@ from scipy.ndimage import gaussian_filter
 import platform
 import plotly.graph_objects as go
 import plotly.express as px
-from score_driving import score_driving_style, ScoreConfig
 from matplotlib.colors import LogNorm
 
 # --- 0. 환경 설정 ---
@@ -398,6 +397,7 @@ else:
 
 
 # In[ ]:
+
 
 
 

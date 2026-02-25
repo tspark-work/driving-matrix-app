@@ -15,16 +15,35 @@ import platform
 import plotly.graph_objects as go
 import plotly.express as px
 from matplotlib.colors import LogNorm
+import matplotlib.font_manager as fm
 
 # --- 0. 환경 설정 ---
 def set_korean_font():
     sys_plat = platform.system()
+    
     if sys_plat == 'Windows':
         plt.rc('font', family='Malgun Gothic')
     elif sys_plat == 'Darwin':
         plt.rc('font', family='AppleGothic')
     else:
-        plt.rc('font', family='NanumGothic')
+        # Streamlit Cloud (Linux) 환경
+        # 1. 캐시 업데이트 및 폰트 확인
+        try:
+            # fonts-nanum 패키지는 보통 이 경로에 설치됨
+            font_path = '/usr/share/fonts/truetype/nanum/NanumGothic.ttf'
+            if os.path.exists(font_path):
+                fe = fm.FontEntry(
+                    fname=font_path,
+                    name='NanumGothic'
+                )
+                fm.fontManager.ttflist.insert(0, fe)
+                plt.rc('font', family='NanumGothic')
+            else:
+                # 설치 경로가 다를 경우 이름으로 검색
+                plt.rc('font', family='NanumGothic')
+        except Exception as e:
+            print(f"Font setup error: {e}")
+            
     plt.rcParams['axes.unicode_minus'] = False
 
 set_korean_font()
@@ -419,6 +438,7 @@ else:
 
 
 # In[ ]:
+
 
 
 

@@ -14,6 +14,7 @@ from scipy.ndimage import gaussian_filter
 import platform
 import plotly.graph_objects as go
 import plotly.express as px
+from score_driving import score_driving_style, ScoreConfig
 from matplotlib.colors import LogNorm
 
 # --- 0. 환경 설정 ---
@@ -140,10 +141,32 @@ def get_driving_scores_vectorized(data, g_limit):
 
 # --- 3. 사이드바 구성 ---
 st.sidebar.header("⚙️ 분석 설정")
-uploaded_file = st.sidebar.file_uploader("주행 데이터 업로드", type=['csv', 'xlsx'])
+uploaded_files = st.sidebar.file_uploader("주행 데이터 업로드", type=['csv', 'xlsx'], accept_multiple_files=True)
 
-if uploaded_file:
-    raw_df = load_data(uploaded_file)
+if uploaded_files:
+    # raw_df = load_data(uploaded_file)
+    # 1. 여러 파일을 담을 리스트 생성
+    df_list = []
+
+    with st.status("데이터 통합 및 전처리 중...", expanded=False) as status:
+        for file in uploaded_files:
+            st.write(f"파일 읽는 중: {file.name}")
+            df_temp = load_data(file)
+            df_list.append(df_temp)
+
+        # 2. 데이터 통합
+        raw_df = pd.concat(df_list, ignore_index=True)
+        target_col = 'packetBodyDrivingId'
+
+        # 3. 중복 제거 (데이터 시간 기준)
+        initial_count = len(raw_df)
+        raw_df = raw_df.drop_duplicates(subset=[target_col]).sort_values(target_col).reset_index(drop=True)
+        final_count = len(raw_df)
+        status.update(label=f"통합 완료! (총 {len(uploaded_files)}개 파일)", state="complete")
+
+    # 중복 제거 알림 (중복이 있었을 경우만 표시)
+    if initial_count > final_count:
+        st.caption(f"ℹ️ 중복된 데이터 {initial_count - final_count:,}건을 제거했습니다.")
 
     # 설정값 (UI)
     analysis_unit = st.sidebar.selectbox("분석 단위", ["전체 단위 (Overall)", "일 단위 (Daily)", "주 단위 (Weekly)", "요일 단위 (Day of Week)", "월 단위 (Monthly)"])
@@ -194,7 +217,7 @@ if uploaded_file:
                             color='red', fontweight='bold', fontsize=9)
                     ax.set_xlabel("Speed (km/h)", fontsize=10)
                     ax.set_ylabel("Data Frequency (Count)", fontsize=10)
-                    st.pyplot(fig, use_container_width=True)
+                    st.pyplot(fig, width="stretch")
                     plt.close(fig)
 
                 # G-G Map (성능 최적화: 히스토그램2D 기반)
@@ -234,7 +257,7 @@ if uploaded_file:
 
                     ax_g.set_xlabel("Lateral Acceleration (accYG)", fontsize=10)
                     ax_g.set_ylabel("Longitudinal Acceleration (accXG)", fontsize=10)
-                    st.pyplot(fig_g, use_container_width=True)
+                    st.pyplot(fig_g, width="stretch")
                     plt.close(fig_g)
 
                 with c3:
@@ -285,7 +308,7 @@ if uploaded_file:
                     ax.set_xlabel("Lateral Acceleration (accYG)", fontsize=10)
                     ax.set_ylabel("Longitudinal Acceleration (accXG)", fontsize=10)
 
-                    st.pyplot(fig, use_container_width=True)
+                    st.pyplot(fig, width="stretch")
                     plt.close(fig)
 
                 # Radar Chart
@@ -308,7 +331,7 @@ if uploaded_file:
                 #     categories = ['급가속', '급제동', '좌회전', '우회전', '불안정성', '과속']
                 #     fig_radar = go.Figure(go.Scatterpolar(r=scores+[scores[0]], theta=categories+[categories[0]], fill='toself', line_color='#FF4B4B'))
                 #     fig_radar.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 100])), height=400, margin=dict(l=30, r=30, t=30, b=30))
-                #     st.plotly_chart(fig_radar, use_container_width=True, config={'displayModeBar': True})
+                #     st.plotly_chart(fig_radar, width="stretch", config={'displayModeBar': True})
                 #     # st.json(result["debug"])
 
     with tab2:
@@ -397,7 +420,6 @@ else:
 
 
 # In[ ]:
-
 
 
 

@@ -14,36 +14,19 @@ from scipy.ndimage import gaussian_filter
 import platform
 import plotly.graph_objects as go
 import plotly.express as px
+from score_driving import score_driving_style, ScoreConfig
 from matplotlib.colors import LogNorm
-import matplotlib.font_manager as fm
+from mpl_toolkits.mplot3d import Axes3D
 
 # --- 0. 환경 설정 ---
 def set_korean_font():
     sys_plat = platform.system()
-    
     if sys_plat == 'Windows':
         plt.rc('font', family='Malgun Gothic')
     elif sys_plat == 'Darwin':
         plt.rc('font', family='AppleGothic')
     else:
-        # Streamlit Cloud (Linux) 환경
-        # 1. 캐시 업데이트 및 폰트 확인
-        try:
-            # fonts-nanum 패키지는 보통 이 경로에 설치됨
-            font_path = '/usr/share/fonts/truetype/nanum/NanumGothic.ttf'
-            if os.path.exists(font_path):
-                fe = fm.FontEntry(
-                    fname=font_path,
-                    name='NanumGothic'
-                )
-                fm.fontManager.ttflist.insert(0, fe)
-                plt.rc('font', family='NanumGothic')
-            else:
-                # 설치 경로가 다를 경우 이름으로 검색
-                plt.rc('font', family='NanumGothic')
-        except Exception as e:
-            print(f"Font setup error: {e}")
-            
+        plt.rc('font', family='NanumGothic')
     plt.rcParams['axes.unicode_minus'] = False
 
 set_korean_font()
@@ -67,20 +50,38 @@ st.markdown("""
 # --- 1. 데이터 로드 및 전처리 (캐싱 최적화) ---
 @st.cache_data
 def load_data(file):
-    if file.name.endswith('.xlsx'):
-        df = pd.read_excel(file, sheet_name='PacketBodyDriving')
-    else:
-        df = pd.read_csv(file, sep=None, engine='python')
+    try:
+        if file.name.endswith('.xlsx'):
+            df = pd.read_excel(file, sheet_name='PacketBodyDriving')
+        else:
+            df = pd.read_csv(file, sep=None, engine='python')
 
-    # 벡터화된 시간 변수 생성
-    dt_col = pd.to_datetime(df['dataTime'])
-    df['dataTime'] = dt_col
-    df['date'] = dt_col.dt.date
-    df['month'] = dt_col.dt.to_period('M').astype(str)
-    df['week'] = "Week " + dt_col.dt.isocalendar().week.astype(str)
-    df['day_name'] = dt_col.dt.day_name()
-    df['overall'] = "전체 기간 (Overall)"
-    return df
+        if df.empty:
+            st.warning(f"⚠️ {file.name}: 파일에 데이터가 없습니다.")
+            return None
+
+        if 'dataTime' not in df.columns:
+            st.error(f"❌ {file.name}: 'dataTime' 컬럼을 찾을 수 없습니다.")
+            return None
+
+        dt_col = pd.to_datetime(df['dataTime'], errors='coerce') # 잘못된 형식은 NaT로 변환
+
+        if dt_col.isna().all():
+            st.error(f"❌ {file.name}: 'dataTime' 형식이 올바르지 않습니다.")
+            return None
+
+        df['dataTime'] = dt_col
+        df['date'] = dt_col.dt.date
+        df['month'] = dt_col.dt.to_period('M').astype(str)
+        df['week'] = "Week " + dt_col.dt.isocalendar().week.astype(str)
+        df['day_name'] = dt_col.dt.day_name()
+        df['overall'] = "전체 기간 (Overall)"
+
+        return df
+
+    except Exception as e:
+        st.error(f"🔥 파일 로드 중 오류 발생: {e}")
+        return None
 
 def get_driving_scores_vectorized(data, g_limit):
     """
@@ -125,62 +126,77 @@ def get_driving_scores_vectorized(data, g_limit):
     # 거미줄 차트 순환 순서: 급가속 - 과속 - 우회전 - 안정성 - 좌회전 - 급제동
     return [np.nan_to_num(res[k]) for k in ['accel', 'speeding', 'right', 'stability', 'left', 'brake']]
 
-# def get_driving_scores_vectorized(data, g_limit):
-#     if data.empty:
-#         return [0, 0, 0, 0, 0, 0]
 
-#     # 민감도 보정 계수 (낮은 점수대를 넓게 폄)
-#     sens_limit = g_limit * 0.5
+def calc_rms(series):
+    x = series.to_numpy(dtype=float)
+    x = x[~np.isnan(x)] # NaN 제거
+    if len(x) == 0: return 0.0
+    return np.sqrt(np.mean(x**2))
 
-#     def boost_score(val):
-#         return np.clip(np.sqrt(val / 100) * 100, 0, 100)
-
-#     # 과속 점수 (110km/h 초과 시 점수 부여)
-#     speed_limit = 110
-#     over_speed = data.loc[data['speed'] > speed_limit, 'speed']
-#     speeding_score = 0
-#     if not over_speed.empty:
-#         # 110~140km/h 구간을 0~100점으로 환산
-#         raw_speed_score = ((over_speed.quantile(0.9) - speed_limit) / (140 - speed_limit)) * 100
-#         speeding_score = boost_score(raw_speed_score)
-
-#     res = {
-#         'accel': boost_score((data.loc[data['accXG'] > 0, 'accXG'].quantile(0.9) / sens_limit) * 100),
-#         'brake': boost_score((data.loc[data['accXG'] < 0, 'accXG'].abs().quantile(0.9) / sens_limit) * 100),
-#         'right': boost_score((data.loc[data['accYG'] > 0, 'accYG'].quantile(0.9) / sens_limit) * 100),
-#         'left' : boost_score((data.loc[data['accYG'] < 0, 'accYG'].abs().quantile(0.9) / sens_limit) * 100),
-#         'stability': boost_score((data[['accXG', 'accYG']].std().mean() / (sens_limit * 0.3)) * 100),
-#         'speeding': speeding_score
-#     }
-
-#     # 6각형 배치를 위한 순서 정렬
-#     categories = ['급가속', '과속', '우회전', '불안정성', '좌회전', '급제동']
-#     return [np.nan_to_num(res[k]) for k in ['accel', 'speeding', 'right', 'stability', 'left', 'brake']]
+def get_speed_distribution(df):
+    if "speed" not in df.columns or df.empty:
+        return 0.0, 0.0, 0.0
+    s = df["speed"].dropna()
+    n = len(s)
+    if n == 0: return 0.0, 0.0, 0.0
+    p0_40 = (s < 40).sum() / n * 100
+    p40_80 = ((s >= 40) & (s < 80)).sum() / n * 100
+    p80_up = (s >= 80).sum() / n * 100
+    return p0_40, p40_80, p80_up
 
 # --- 3. 사이드바 구성 ---
+if 'all_data' not in st.session_state:
+    st.session_state.all_data = pd.DataFrame()
+if 'uploader_key' not in st.session_state:
+    st.session_state.uploader_key = 0
+
+def clear_all_data():
+    st.session_state.all_data = pd.DataFrame()
+    if 'uploader_key' not in st.session_state:
+        st.session_state.uploader_key = 0
+    st.session_state.uploader_key += 1
+    if 'uploaded_file' in st.session_state:
+        del st.session_state.uploaded_file
+    st.rerun()
+
+with st.sidebar:
+    st.header("⚙️ 데이터 관리")
+    if st.button("🗑️ 모든 데이터 초기화", help="업로드된 모든 주행 데이터를 삭제합니다."):
+        clear_all_data()
+        st.rerun() # 화면 즉시 갱신
+
 st.sidebar.header("⚙️ 분석 설정")
 uploaded_files = st.sidebar.file_uploader("주행 데이터 업로드", type=['csv', 'xlsx'], accept_multiple_files=True)
 
 if uploaded_files:
-    # raw_df = load_data(uploaded_file)
-    # 1. 여러 파일을 담을 리스트 생성
     df_list = []
 
     with st.status("데이터 통합 및 전처리 중...", expanded=False) as status:
         for file in uploaded_files:
             st.write(f"파일 읽는 중: {file.name}")
             df_temp = load_data(file)
-            df_list.append(df_temp)
+            if df_temp is not None:
+                if 'packetBodyDrivingId' in df_temp.columns:
+                    df_list.append(df_temp)
+                else:
+                    st.warning(f"⚠️ {file.name}: 'packetBodyDrivingId' 컬럼이 없어 제외되었습니다.")
+            else:
+                continue
 
-        # 2. 데이터 통합
+        if not df_list:
+            status.update(label="통합 실패: 유효한 파일이 없습니다.", state="error")
+            st.error("❌ 분석할 수 있는 정상적인 데이터가 없습니다. 파일을 확인해주세요.")
+            st.stop()
+
         raw_df = pd.concat(df_list, ignore_index=True)
         target_col = 'packetBodyDrivingId'
 
-        # 3. 중복 제거 (데이터 시간 기준)
         initial_count = len(raw_df)
+        raw_df = raw_df.dropna(subset=[target_col])
         raw_df = raw_df.drop_duplicates(subset=[target_col]).sort_values(target_col).reset_index(drop=True)
+
         final_count = len(raw_df)
-        status.update(label=f"통합 완료! (총 {len(uploaded_files)}개 파일)", state="complete")
+        status.update(label=f"통합 완료! (총 {len(df_list)}개 파일 성공)", state="complete")
 
     # 중복 제거 알림 (중복이 있었을 경우만 표시)
     if initial_count > final_count:
@@ -200,9 +216,9 @@ if uploaded_files:
 
     # 마모 임계값
     h_acc, h_brk, h_trn = st.sidebar.columns(3)
-    hard_accel_threshold = h_acc.number_input("급가속 G", 0.0, 1.0, 0.3)
-    hard_brake_threshold = h_brk.number_input("급제동 G", 0.0, 1.0, 0.3)
-    hard_turn_threshold = h_trn.number_input("급선회 G", 0.0, 1.0, 0.3)
+    hard_accel_threshold = h_acc.number_input("급가속 G", 0.0, 1.0, 0.05)
+    hard_brake_threshold = h_brk.number_input("급제동 G", 0.0, 1.0, 0.05)
+    hard_turn_threshold = h_trn.number_input("급선회 G", 0.0, 1.0, 0.05)
 
     # 필터링
     df = raw_df[(raw_df['speed'] >= speed_min) & (raw_df['accXG'].abs() <= g_max) & (raw_df['accYG'].abs() <= g_max)].copy()
@@ -213,8 +229,27 @@ if uploaded_files:
     # 정렬 설정
     group_list = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'] if group_col == 'day_name' else sorted(df[group_col].unique())
 
+    summary = df.groupby(group_col).agg(
+        평균속도=('speed', 'mean'),
+        최대속도=('speed', 'max'),
+        급가속횟수=('accXG', lambda x: (x > hard_accel_threshold).sum()),
+        급제동횟수=('accXG', lambda x: (x < -hard_brake_threshold).sum()),
+        급선회횟수=('accYG', lambda x: (x.abs() > hard_turn_threshold).sum()),
+        데이터수=('dataTime', 'count')
+    )
+
+    # 마모지수 산출 (가중치 적용)
+    summary['마모지수'] = (
+        (summary['급가속횟수'] * 0.5 +
+         summary['급제동횟수'] * 0.7 +
+         summary['급선회횟수'] * 1.0) /
+        summary['데이터수'].replace(0, 1) * 1000
+    ).round(2)
+
+    avg_wear_idx = float(summary['마모지수'].mean()) if not summary.empty else 1.0
+
     # --- 4. 메인 분석 화면 ---
-    tab1, tab2, tab3 = st.tabs(["📈 시각화 분석", "🔢 데이터 통계", "🛞 타이어 마모 예측"])
+    tab1, tab2, tab3 = st.tabs(["📈 시각화 분석", "🔢 데이터 통계", "🛞 마모 인자 분석"])
 
     with tab1:
         for item in group_list:
@@ -223,6 +258,7 @@ if uploaded_files:
 
             with st.expander(f"📍 {item} 리포트 ({len(plot_data):,} 샘플)", expanded=True):
                 c1, c2, c3 = st.columns(3)
+                # c1, c2, c3, c4= st.columns(4)
 
                 # 속도 히스토그램
                 with c1:
@@ -230,11 +266,22 @@ if uploaded_files:
                     st.markdown("<h3 style='text-align: center; margin-bottom: 0px;'>🎢 주행 속도 분포</h3>", unsafe_allow_html=True)
                     sns.histplot(plot_data['speed'], bins=20, kde=True, color='skyblue', ax=ax)
                     avg_speed = plot_data['speed'].mean()
-                    ax.axvline(avg_speed, color='red', linestyle='--', linewidth=1.5, label=f'Avg: {avg_speed:.1f}')
-                    ax.text(avg_speed + 2, ax.get_ylim()[1] * 0.9, f'{avg_speed:.1f} km/h',
+
+                    if not plot_data['speed'].dropna().empty:
+                        max_dist_speed = plot_data['speed'].round(1).mode().iloc[0]
+                    else:
+                        max_dist_speed = 0
+
+                    ax.axvline(avg_speed, color='red', linestyle='--', linewidth=1.5)
+                    ax.text(avg_speed + 2, ax.get_ylim()[1] * 0.9, f'평균: {avg_speed:.1f}',
                             color='red', fontweight='bold', fontsize=9)
+
+                    ax.axvline(max_dist_speed, color='purple', linestyle='-', linewidth=2)
+                    ax.text(max_dist_speed + 2, ax.get_ylim()[1] * 0.8, f'최대 분포: {max_dist_speed:.1f}',
+                            color='purple', fontweight='bold', fontsize=9)
+
                     ax.set_xlabel("Speed (km/h)", fontsize=10)
-                    ax.set_ylabel("Data Frequency (Count)", fontsize=10)
+                    ax.set_ylabel("Count", fontsize=10)
                     st.pyplot(fig, width="stretch")
                     plt.close(fig)
 
@@ -329,117 +376,220 @@ if uploaded_files:
                     st.pyplot(fig, width="stretch")
                     plt.close(fig)
 
-                # Radar Chart
-                # with c3:
-                #     st.markdown("<h4 style='text-align: center;'>🕸️ 주행 성향 분석</h4>", unsafe_allow_html=True)
-                #     scores = get_driving_scores_vectorized(plot_data, g_limit)
-                #     # cfg = ScoreConfig(
-                #     #     fs=100.0,
-                #     #     speed_unit="kmh"
-                #     # )
-                #     # result = score_driving_style(plot_data, cfg)
-                #     # scores = [
-                #     #     result["harsh_accel_score"],
-                #     #     result["harsh_brake_score"],
-                #     #     result["left_turn_score"],
-                #     #     result["right_turn_score"],
-                #     #     result["instability_score"],
-                #     #     result["overspeed_score"],
-                #     # ]
-                #     categories = ['급가속', '급제동', '좌회전', '우회전', '불안정성', '과속']
-                #     fig_radar = go.Figure(go.Scatterpolar(r=scores+[scores[0]], theta=categories+[categories[0]], fill='toself', line_color='#FF4B4B'))
-                #     fig_radar.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 100])), height=400, margin=dict(l=30, r=30, t=30, b=30))
-                #     st.plotly_chart(fig_radar, width="stretch", config={'displayModeBar': True})
-                #     # st.json(result["debug"])
+    def get_mode_speed(x):
+        if x.dropna().empty: return 0.0
+        return x.round(1).mode().iloc[0]
+
+    summary = df.groupby(group_col).agg(
+        평균속도=('speed', 'mean'),
+        최대속도=('speed', 'max'),
+        최대분포속도=('speed', get_mode_speed), # 최빈값 로직 적용
+        급가속횟수=('accXG', lambda x: (x > hard_accel_threshold).sum()),
+        급제동횟수=('accXG', lambda x: (x < -hard_brake_threshold).sum()),
+        급선회횟수=('accYG', lambda x: (x.abs() > hard_turn_threshold).sum()),
+        데이터수=('dataTime', 'count')
+    )
+
+    acc_threshold = hard_accel_threshold # 또는 hard_accel_threshold * 0.5 (유연한 판정 시)
+    brk_threshold = hard_brake_threshold
+
+    summary['가속_비율'] = df.groupby(group_col)['accXG'].apply(
+        lambda x: (x > acc_threshold).sum() / len(x) * 100).round(1)
+    summary['감속_비율'] = df.groupby(group_col)['accXG'].apply(
+        lambda x: (x < -brk_threshold).sum() / len(x) * 100).round(1)
+    summary['정속_비율'] = (100 - summary['가속_비율'] - summary['감속_비율']).round(1)
+
+    # 2. 횡방향 거동 분류 (사용자가 설정한 급선회 기준 활용)
+    turn_threshold = hard_turn_threshold
+
+    summary['좌선회_비율'] = df.groupby(group_col)['accYG'].apply(
+        lambda x: (x > turn_threshold).sum() / len(x) * 100).round(1)
+    summary['우선회_비율'] = df.groupby(group_col)['accYG'].apply(
+        lambda x: (x < -turn_threshold).sum() / len(x) * 100).round(1)
+    summary['직진_비율'] = (100 - summary['좌선회_비율'] - summary['우선회_비율']).round(1)
 
     with tab2:
-        # 그룹별 통계 (한 번에 계산)
-        summary = df.groupby(group_col).agg(
-            평균속도=('speed', 'mean'),
-            최대속도=('speed', 'max'),
-            급가속횟수=('accXG', lambda x: (x > hard_accel_threshold).sum()),
-            급제동횟수=('accXG', lambda x: (x < -hard_brake_threshold).sum()),
-            급선회횟수=('accYG', lambda x: (x.abs() > hard_turn_threshold).sum()),
-            데이터수=('dataTime', 'count')
+        st.markdown("### 🔢 주행 그룹별 가혹도 및 거동 비율")
+        display_cols = [
+            '평균속도', '최대분포속도', '최대속도',
+            '가속_비율', '정속_비율', '감속_비율',
+            '좌선회_비율', '직진_비율', '우선회_비율',
+            '데이터수'
+        ]
+
+        if group_col == 'day_name':
+            display_summary = summary.reindex(group_list)[display_cols]
+        else:
+            display_summary = summary[display_cols]
+
+        st.dataframe(
+            display_summary.style
+            .format("{:.1f} km/h", subset=['평균속도', '최대분포속도', '최대속도'])
+            .format("{:,}", subset=['데이터수'])
+            .format("{:.1f}%", subset=[c for c in display_summary.columns if '비율' in c])
         )
-        if group_col == 'day_name': summary = summary.reindex(group_list)
-        st.dataframe(summary.style.highlight_max(axis=0, color="#fffb18"))
+        with st.expander("ℹ️ 분석 기준 및 비율 계산 로직 안내", expanded=True):
+            st.markdown(f"""
+            본 대시보드의 거동 비율은 사이드바에서 설정하신 임계값(급가속G, 급제동G, 급선회G)을 기준으로 산출됩니다.
 
-    # with tab3:
-    #     st.write("### 📉 타이어 위치별 상세 마모 프로파일 (Center / Shoulder / Total)")
+            **1. 종방향 거동 (가속/정속/감속)**
+            * **가속**: 앞뒤 가속도(`accXG`) > `{acc_threshold}G` (설정된 급가속 기준)
+            * **감속**: 앞뒤 가속도(`accXG`) < `-{brk_threshold}G` (설정된 급제동 기준)
+            * **정속**: 가속과 감속 사이의 모든 구간 (미세한 속도 변화 포함)
 
-    #     # 1. 마모지수 및 기본 설정
-    #     if '마모지수' not in summary.columns:
-    #         summary['마모지수'] = ((summary['급가속횟수']*0.5 + summary['급제동횟수']*0.7 + summary['급선회횟수']*1.0) /
-    #                             summary['데이터수'].replace(0, 1) * 1000).round(2)
+            **2. 횡방향 거동 (좌선회/직진/우선회)**
+            * **좌선회**: 좌우 가속도(`accYG`) > `{turn_threshold}G` (설정된 급선회 기준)
+            * **우선회**: 좌우 가속도(`accYG`) < `-{turn_threshold}G`
+            * **직진**: 좌우 흔들림이 `{turn_threshold}G` 이내인 구간
 
-    #     avg_idx = summary['마모지수'].mean()
-    #     base_wear_rate = 0.0001  # 기준 마모율
-    #     x_range = np.linspace(0, 80000, 100)
-    #     limit_depth = 1.6
+            **3. 비율 계산 공식**
+            * 각 항목의 비율(%) = (해당 거동 데이터 수 / 전체 데이터 수) × 100
+            """)
+        st.divider()
+        if not display_summary.empty:
+            radar_data = display_summary[['가속_비율', '정속_비율', '감속_비율',
+                                        '좌선회_비율', '직진_비율', '우선회_비율']].mean()
 
-    #     # 타이어 위치 및 마모 부위별 가중치 설정
-    #     tire_positions = ['FL', 'FR', 'RL', 'RR']
-    #     # 부위별 가중치: Shoulder는 코너링(횡G)에, Center는 가감속(종G)에 더 민감하다고 가정
-    #     part_configs = {
-    #         'Center': {'color': 'red', 'weight_adj': 1.0},
-    #         'Shoulder': {'color': 'green', 'weight_adj': 1.2}, # 횡G 영향으로 보통 더 빨리 마모
-    #         'Total': {'color': 'blue', 'weight_adj': 1.1}
-    #     }
+            c_long, c_lat = st.columns(2)
 
-    #     # 2. 2x2 그래프 레이아웃 생성
-    #     fig, axes = plt.subplots(2, 2, figsize=(15, 10), constrained_layout=True)
-    #     axes = axes.flatten() # 2D 배열을 1D로 변환하여 반복문 사용 용이하게 함
+            with c_long:
+                fig_donut_long = go.Figure(data=[go.Pie(
+                    labels=['가속', '정속', '감속'],
+                    values=[radar_data['가속_비율'], radar_data['정속_비율'], radar_data['감속_비율']],
+                    hole=.5,
+                    marker_colors=['#EA4335', '#34A853', '#FBBC04'],
+                    textinfo='label+percent',
+                    hoverinfo='label+value'
+                )])
+                fig_donut_long.update_layout(
+                    # 제목에 사이드바에서 선택한 분석 단위(예: 요일별 분석)를 표시
+                    title=dict(text=f"전체 {analysis_unit} 종방향 비중", x=0.5, y=0.95),
+                    showlegend=False,
+                    margin=dict(t=50, b=20, l=20, r=20),
+                    width=400,
+                    height=350
+                )
+                st.plotly_chart(fig_donut_long)
 
-    #     for i, pos in enumerate(tire_positions):
-    #         ax = axes[i]
-    #         # 위치별 기본 가중치 (전륜 1.2, 후륜 0.8)
-    #         pos_weight = 1.2 if 'F' in pos else 0.8
+            with c_lat:
+                fig_donut_lat = go.Figure(data=[go.Pie(
+                    labels=['좌선회', '직진', '우선회'],
+                    values=[radar_data['좌선회_비율'], radar_data['직진_비율'], radar_data['우선회_비율']],
+                    hole=.5,
+                    marker_colors=['#4285F4', '#BDC1C6', '#8AB4F8'],
+                    textinfo='label+percent',
+                    hoverinfo='label+value'
+                )])
+                fig_donut_lat.update_layout(
+                    title=dict(text=f"전체 {analysis_unit} 횡방향 비중", x=0.5, y=0.95),
+                    showlegend=False,
+                    margin=dict(t=50, b=20, l=20, r=20),
+                    width=400,
+                    height=350
+                )
+                st.plotly_chart(fig_donut_lat)
 
-    #         for part, config in part_configs.items():
-    #             # 최종 마모율 = 기본 * 주행지수 * 위치가중치 * 부위가중치
-    #             slope = base_wear_rate * (1 + (avg_idx / 10)) * pos_weight * config['weight_adj']
-    #             y_vals = 8.0 - (slope * x_range)
-    #             y_vals = np.clip(y_vals, 0, 8.0)
+    with tab3:
+        st.header("🔬 타이어 마모 인자 분석")
 
-    #             # 추세선 그리기
-    #             ax.plot(x_range, y_vals, label=part, color=config['color'], lw=2)
+        with st.expander("📝 데이터 전처리 기준", expanded=True):
+            st.markdown(f"""
+            주행 데이터 분석의 정확도를 높이기 위해 다음과 같은 필터링 조건이 적용되었습니다.
 
-    #             # 마모 한계선 교차점 계산 및 표시
-    #             intercept_km = (8.0 - limit_depth) / slope
-    #             if intercept_km < 80000:
-    #                 ax.scatter(intercept_km, limit_depth, color=config['color'], s=30)
-    #                 ax.text(intercept_km, limit_depth + 0.2, f"{int(intercept_km):,}km",
-    #                         color=config['color'], fontsize=8, ha='center')
+            **1. 최소 속도 필터링 (Speed Threshold)**
+            * **현재 기준**: `{speed_min} km/h` 이상인 데이터만 분석에 포함
+            * 본 분석에서는 속도가 **`{speed_min} km/h` 미만**인 모든 구간을 '정차' 또는 '유효하지 않은 주행' 구간으로 간주합니다.
+            * 신호 대기, 예열, 혹은 차량 정지 상태에서 발생하는 IMU 센서 데이터는 거동 비율 통계(가속/선회 등)에서 제외됩니다.
 
-    #         # 그래프 세부 설정
-    #         ax.axhline(limit_depth, color='grey', linestyle='--', alpha=0.5)
-    #         ax.set_title(f"Tire Profile: {pos}", fontsize=14)
-    #         ax.set_xlabel("Mileage (km)")
-    #         ax.set_ylabel("Depth (mm)")
-    #         ax.set_ylim(0, 8.5)
-    #         ax.grid(True, linestyle=':', alpha=0.6)
-    #         ax.legend(loc='upper right')
+            **2. 속도 구간의 분류 기준**
+            * **시내 (Urban)**: `{speed_min} km/h` ~ `40 km/h` 구간
+            * **일반 (Suburban)**: `40 km/h` ~ `80 km/h` 구간
+            * **고속 (Highway)**: `80 km/h` 초과 구간
 
-    #     st.pyplot(fig)
-    #     plt.close(fig)
+            **3. 구간별 비중(%) 계산 방식**
+            * 최소 속도(`{speed_min} km/h`) 필터를 통과한 **전체 유효 주행 데이터 수**를 기준으로 합니다.
+            * **공식**: `(해당 구간 데이터 수 / 유효 주행 전체 데이터 수) × 100`
+            """)
 
-    #     # 3. 요약 리포트
-    #     st.divider()
-    #     cols = st.columns(4)
-    #     for i, pos in enumerate(tire_positions):
-    #         # 종합(Total) 기준으로 남은 수명 표시
-    #         pos_weight = 1.2 if 'F' in pos else 0.8
-    #         total_slope = base_wear_rate * (1 + (avg_idx / 10)) * pos_weight * 1.1
-    #         life_km = (8.0 - limit_depth) / total_slope
-    #         cols[i].metric(f"{pos} 예상 수명", f"{int(life_km):,} km")
+        st.info("💡 분석할 기간의 시작 날짜와 종료 날짜를 입력하세요. (예: 2025-10-01)")
+        mileage_cols = ["시작", "종료"]
+
+        if 'schedule_data' not in st.session_state:
+            st.session_state.schedule_data = {m: "" for m in mileage_cols}
+
+        input_df = pd.DataFrame([st.session_state.schedule_data])
+
+        edited_schedule = st.data_editor(
+            input_df,
+            column_config={m: st.column_config.TextColumn(m, width="medium") for m in mileage_cols},
+            num_rows="fixed",
+            width="stretch",
+            hide_index=True,
+            key="schedule_editor"
+        )
+
+        is_input_complete = not (edited_schedule.values == "").any()
+
+        if is_input_complete:
+            if not df.empty:
+                try:
+                    analysis_df = df.copy()
+                    analysis_df.columns = [c.strip() for c in analysis_df.columns] # 공백 제거
+                    target_col = 'dataTimeDate'
+                    if target_col not in analysis_df.columns:
+                        st.error(f"❌ 파일에 '{target_col}' 컬럼이 없습니다. (현재 컬럼: {list(analysis_df.columns)})")
+                    else:
+                        analysis_df['datetime'] = pd.to_datetime(analysis_df[target_col])
+                        start_dt = pd.to_datetime(edited_schedule.iloc[0]["시작"])
+                        end_dt = pd.to_datetime(edited_schedule.iloc[0]["종료"])
+
+                        mask = (analysis_df['datetime'] >= start_dt) & (analysis_df['datetime'] <= end_dt)
+                        filtered_df = analysis_df.loc[mask]
+
+                        if filtered_df.empty:
+                            st.error(f"❌ {start_dt.date()} ~ {end_dt.date()} 기간 내에 데이터가 없습니다.")
+                        else:
+                            st.success(f"✅ {start_dt.date()} ~ {end_dt.date()} 구간 분석 완료 (데이터: {len(filtered_df)}건)")
+                            st.divider()
+
+                            df_run = filtered_df[filtered_df['speed'] > speed_min].copy() if 'speed' in filtered_df.columns else filtered_df.copy()
+
+                            if df_run.empty:
+                                st.warning(f"⚠️ 해당 기간 내 주행 데이터({speed_min}km/h 이상)가 없습니다.")
+                            else:
+                                summary_cols = ["speed", "accXG", "accYG", "accZG", "yawDps", "rollDps", "pitchDps"]
+                                rms_dict = {}
+                                for col in summary_cols:
+                                    if col in df_run.columns:
+                                        val = calc_rms(df_run[col])
+                                        unit = "G" if "acc" in col else "dps" if "Dps" in col else "km/h"
+                                        rms_dict[col] = f"{val:.4f} {unit}" if "acc" in col else f"{val:.2f} {unit}"
+
+                                rms_horiz_df = pd.DataFrame([rms_dict])
+
+                                st.markdown("**📍 선택 기간 IMU RMS**")
+                                st.dataframe(
+                                    rms_horiz_df.style.set_properties(**{'text-align': 'center', 'background-color': '#e1f5fe'}),
+                                    width="stretch",
+                                    hide_index=True
+                                )
+                                p0, p40, p80 = get_speed_distribution(df_run)
+                                dist_df = pd.DataFrame([{"시내 (0-40)": f"{p0:.1f}%", "일반 (40-80)": f"{p40:.1f}%", "고속 (80+)": f"{p80:.1f}%"}])
+                                st.markdown("**🛣️ 선택 기간 주행 속도 비율**")
+                                st.dataframe(dist_df.style.set_properties(**{'text-align': 'center'}), width="stretch", hide_index=True)
+
+                except Exception as e:
+                    st.error(f"날짜 처리 오류: {e}")
+            else:
+                st.warning("⚠️ 주행 데이터를 먼저 업로드해 주세요.")
+        else:
+            st.write("---")
+            st.info("ℹ️ 시작/종료 날짜를 입력하면 기간 분석이 시작됩니다.")
 else:
     st.info("👈 데이터를 업로드해주세요.")
 
 
 # In[ ]:
-
-
 
 
 

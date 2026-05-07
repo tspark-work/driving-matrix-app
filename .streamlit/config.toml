@@ -1,0 +1,5 @@
+[theme]
+base="light"
+primaryColor="#ff4b4b"
+[server]
+maxUploadSize = 500  # 단위: MB

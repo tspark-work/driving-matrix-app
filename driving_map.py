@@ -254,7 +254,14 @@ if uploaded_files:
 
     # 설정값 (UI)
     analysis_unit = st.sidebar.selectbox("분석 단위", ["전체 단위 (Overall)", "일 단위 (Daily)", "주 단위 (Weekly)", "요일 단위 (Day of Week)", "월 단위 (Monthly)"])
-    speed_min = st.sidebar.slider("최소 속도 (km/h)", 0, 100, 1)
+    speed_range = st.sidebar.slider(
+        "분석 속도 범위 설정 (km/h)",
+        0, 200,            # 슬라이더의 전체 범위 (Min, Max)
+        (1, 200),          # 초기 선택값
+        step=1
+    )
+    speed_min, speed_max = speed_range
+    st.sidebar.caption(f"📊 설정된 범위: {speed_min}km/h ~ {speed_max}km/h")
     g_max = st.sidebar.slider("G 최대값", 0.1, 2.0, 1.0)
     g_limit = st.sidebar.slider("G-Limit 범위", 0.1, 2.0, 0.5)
 

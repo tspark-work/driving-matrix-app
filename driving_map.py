@@ -200,12 +200,21 @@ if 'uploader_key' not in st.session_state:
 
 def clear_all_data():
     st.session_state.all_data = pd.DataFrame()
-    if 'uploader_key' not in st.session_state:
-        st.session_state.uploader_key = 0
     st.session_state.uploader_key += 1
     if 'uploaded_file' in st.session_state:
         del st.session_state.uploaded_file
-    st.rerun()
+
+with st.sidebar:
+    st.header("⚙️ 데이터 관리")
+    if st.button("🗑️ 모든 데이터 초기화", help="업로드된 모든 주행 데이터를 삭제합니다."):
+        clear_all_data()
+        st.rerun() # 화면 즉시 갱신
+    uploaded_files = st.sidebar.file_uploader(
+        "주행 데이터 업로드",
+        type=['csv', 'xlsx'],
+        accept_multiple_files=True,
+        key=f"uploader_{st.session_state.uploader_key}"
+    )
 
 with st.sidebar:
     st.header("⚙️ 데이터 관리")

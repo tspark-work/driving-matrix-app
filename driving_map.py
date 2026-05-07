@@ -216,13 +216,6 @@ with st.sidebar:
         key=f"uploader_{st.session_state.uploader_key}"
     )
 
-with st.sidebar:
-    st.header("⚙️ 데이터 관리")
-    if st.button("🗑️ 모든 데이터 초기화", help="업로드된 모든 주행 데이터를 삭제합니다."):
-        clear_all_data()
-        st.rerun() # 화면 즉시 갱신
-    uploaded_files = st.sidebar.file_uploader("주행 데이터 업로드", type=['csv', 'xlsx'], accept_multiple_files=True)
-
 st.sidebar.header("⚙️ 분석 설정")
 
 if uploaded_files:

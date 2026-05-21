@@ -262,6 +262,7 @@ if uploaded_files:
     )
     speed_min, speed_max = speed_range
     st.sidebar.caption(f"📊 설정된 범위: {speed_min}km/h ~ {speed_max}km/h")
+    r_max = st.sidebar.slider("Dps 최대값", 10.0, 1000.0, 500.0, step=10.0)
     g_max = st.sidebar.slider("G 최대값", 0.1, 2.0, 1.0)
     g_limit = st.sidebar.slider("G-Limit 범위", 0.1, 2.0, 0.5)
 
@@ -278,7 +279,11 @@ if uploaded_files:
     hard_turn_threshold = h_trn.number_input("급선회 G", 0.0, 1.0, 0.05)
 
     # 필터링
-    df = raw_df[(raw_df['speed'] >= speed_min) & (raw_df['accXG'].abs() <= g_max) & (raw_df['accYG'].abs() <= g_max)].copy()
+    df = raw_df[
+        (raw_df['speed'] >= speed_min) & (raw_df['speed'] <= speed_max) &
+        (raw_df['accXG'].abs() <= g_max) & (raw_df['accYG'].abs() <= g_max) &
+        (raw_df['yawDps'].abs() <= r_max) & (raw_df['pitchDps'].abs() <= r_max) & (raw_df['rollDps'].abs() <= r_max)
+        ].copy()
 
     if selected_case == "Case 2":
         df_fix = df.copy()

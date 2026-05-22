@@ -1,9 +1,6 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[ ]:
-
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -14,11 +11,11 @@ from scipy.ndimage import gaussian_filter
 import platform
 import plotly.graph_objects as go
 import plotly.express as px
-# from score_driving import score_driving_style, ScoreConfig
+from score_driving import score_driving_style, ScoreConfig
 from matplotlib.colors import LogNorm
 from mpl_toolkits.mplot3d import Axes3D
 from scipy.signal import medfilt
-
+import gc
 
 # --- 0. 환경 설정 ---
 def set_korean_font():
@@ -65,7 +62,6 @@ else:
     st.caption("🔄 **180도 회전 상태**: 안테나가 전면 유리를 향하고 있습니다. (IMU 데이터 반전 적용)")
 
 # --- 1. 데이터 로드 및 전처리 (캐싱 최적화) ---
-@st.cache_data
 def load_data(file):
     try:
         if file.name.endswith('.xlsx'):
@@ -93,6 +89,10 @@ def load_data(file):
         df['week'] = "Week " + dt_col.dt.isocalendar().week.astype(str)
         df['day_name'] = dt_col.dt.day_name()
         df['overall'] = "전체 기간 (Overall)"
+
+        # float64 타입을 float32로 변환하여 메모리 반토막 내기
+        float_cols = df.select_dtypes(include=['float64']).columns
+        df[float_cols] = df[float_cols].astype('float32')
 
         return df
 
@@ -218,42 +218,45 @@ with st.sidebar:
 
 st.sidebar.header("⚙️ 분석 설정")
 
-if uploaded_files:
+@st.cache_data(show_spinner=False)
+def get_integrated_data(files):
     df_list = []
+    for file in files:
+        df_temp = load_data(file) # 앞서 수정한 메모리 최적화 load_data 함수 사용
+        if df_temp is not None and 'packetBodyDrivingId' in df_temp.columns:
+            df_list.append(df_temp)
 
+        del df_temp
+        gc.collect()
+
+    if not df_list:
+        return None
+
+    raw_df = pd.concat(df_list, ignore_index=True)
+    del df_list
+    gc.collect()
+
+    target_col = 'packetBodyDrivingId'
+    raw_df = raw_df.dropna(subset=[target_col])
+    raw_df = raw_df.drop_duplicates(subset=[target_col]).sort_values(target_col).reset_index(drop=True)
+
+    return raw_df
+
+if uploaded_files:
     with st.status("데이터 통합 및 전처리 중...", expanded=False) as status:
-        for file in uploaded_files:
-            st.write(f"파일 읽는 중: {file.name}")
-            df_temp = load_data(file)
-            if df_temp is not None:
-                if 'packetBodyDrivingId' in df_temp.columns:
-                    df_list.append(df_temp)
-                else:
-                    st.warning(f"⚠️ {file.name}: 'packetBodyDrivingId' 컬럼이 없어 제외되었습니다.")
-            else:
-                continue
+        # 캐싱된 통합 함수 호출
+        raw_df = get_integrated_data(uploaded_files)
 
-        if not df_list:
+        if raw_df is None or raw_df.empty:
             status.update(label="통합 실패: 유효한 파일이 없습니다.", state="error")
-            st.error("❌ 분석할 수 있는 정상적인 데이터가 없습니다. 파일을 확인해주세요.")
+            st.error("❌ 분석할 수 있는 정상적인 데이터가 없습니다.")
             st.stop()
 
-        raw_df = pd.concat(df_list, ignore_index=True)
-        target_col = 'packetBodyDrivingId'
-
-        initial_count = len(raw_df)
-        raw_df = raw_df.dropna(subset=[target_col])
-        raw_df = raw_df.drop_duplicates(subset=[target_col]).sort_values(target_col).reset_index(drop=True)
-
-        final_count = len(raw_df)
-        status.update(label=f"통합 완료! (총 {len(df_list)}개 파일 성공)", state="complete")
-
-    # 중복 제거 알림 (중복이 있었을 경우만 표시)
-    if initial_count > final_count:
-        st.caption(f"ℹ️ 중복된 데이터 {initial_count - final_count:,}건을 제거했습니다.")
+        status.update(label=f"통합 완료! (총 {len(uploaded_files)}개 파일 성공)", state="complete")
 
     # 설정값 (UI)
     analysis_unit = st.sidebar.selectbox("분석 단위", ["전체 단위 (Overall)", "일 단위 (Daily)", "주 단위 (Weekly)", "요일 단위 (Day of Week)", "월 단위 (Monthly)"])
+    # speed_min = st.sidebar.slider("최소 속도 (km/h)", 0, 100, 1)
     speed_range = st.sidebar.slider(
         "분석 속도 범위 설정 (km/h)",
         0, 200,            # 슬라이더의 전체 범위 (Min, Max)
@@ -279,11 +282,15 @@ if uploaded_files:
     hard_turn_threshold = h_trn.number_input("급선회 G", 0.0, 1.0, 0.05)
 
     # 필터링
+    # df = raw_df[(raw_df['speed'] >= speed_min) & (raw_df['accXG'].abs() <= g_max) & (raw_df['accYG'].abs() <= g_max)].copy()
     df = raw_df[
         (raw_df['speed'] >= speed_min) & (raw_df['speed'] <= speed_max) &
         (raw_df['accXG'].abs() <= g_max) & (raw_df['accYG'].abs() <= g_max) &
         (raw_df['yawDps'].abs() <= r_max) & (raw_df['pitchDps'].abs() <= r_max) & (raw_df['rollDps'].abs() <= r_max)
         ].copy()
+
+    del raw_df
+    gc.collect()
 
     if selected_case == "Case 2":
         df_fix = df.copy()
@@ -607,7 +614,7 @@ if uploaded_files:
     with tab3:
         st.header("🔬 타이어 마모 인자 분석")
 
-        with st.expander("📝 데이터 전처리 기준", expanded=True):
+        with st.expander("📝 데이터 전처리 기준", expanded=False):
             st.markdown(f"""
             주행 데이터 분석의 정확도를 높이기 위해 다음과 같은 필터링 조건이 적용되었습니다.
 
@@ -649,16 +656,18 @@ if uploaded_files:
             if not df.empty:
                 try:
                     analysis_df = df.copy()
-                    analysis_df.columns = [c.strip() for c in analysis_df.columns] # 공백 제거
-                    target_col = 'dataTimeDate'
-                    if target_col not in analysis_df.columns:
-                        st.error(f"❌ 파일에 '{target_col}' 컬럼이 없습니다. (현재 컬럼: {list(analysis_df.columns)})")
+                    # analysis_df.columns = [c.strip() for c in analysis_df.columns] # 공백 제거
+                    # target_col = 'dataTimeDate'
+                    # if target_col not in analysis_df.columns:
+                    #     st.error(f"❌ 파일에 '{target_col}' 컬럼이 없습니다. (현재 컬럼: {list(analysis_df.columns)})")
+                    if 'dataTime' not in analysis_df.columns:
+                        st.error("❌ 파일에 'dataTime' 컬럼이 없습니다.")
                     else:
-                        analysis_df['datetime'] = pd.to_datetime(analysis_df[target_col])
+                        # analysis_df['datetime'] = pd.to_datetime(analysis_df[target_col])
                         start_dt = pd.to_datetime(edited_schedule.iloc[0]["시작"])
                         end_dt = pd.to_datetime(edited_schedule.iloc[0]["종료"])
 
-                        mask = (analysis_df['datetime'] >= start_dt) & (analysis_df['datetime'] <= end_dt)
+                        mask = (analysis_df['dataTime'] >= start_dt) & (analysis_df['dataTime'] <= end_dt)
                         filtered_df = analysis_df.loc[mask]
 
                         if filtered_df.empty:
@@ -908,10 +917,3 @@ if uploaded_files:
     #         plt.close(fig)
 else:
     st.info("👈 데이터를 업로드해주세요.")
-
-
-# In[ ]:
-
-
-
-

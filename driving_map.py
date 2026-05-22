@@ -11,7 +11,7 @@ from scipy.ndimage import gaussian_filter
 import platform
 import plotly.graph_objects as go
 import plotly.express as px
-from score_driving import score_driving_style, ScoreConfig
+# from score_driving import score_driving_style, ScoreConfig
 from matplotlib.colors import LogNorm
 from mpl_toolkits.mplot3d import Axes3D
 from scipy.signal import medfilt

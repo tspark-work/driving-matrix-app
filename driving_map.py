@@ -64,10 +64,12 @@ else:
 # --- 1. 데이터 로드 및 전처리 (캐싱 최적화) ---
 def load_data(file):
     try:
+        target_columns = ['packetBodyDrivingId', 'dataTime', 'speed', 'accXG', 'accYG', 'accZG', 'yawDps', 'pitchDps', 'rollDps']
+
         if file.name.endswith('.xlsx'):
-            df = pd.read_excel(file, sheet_name='PacketBodyDriving')
+            df = pd.read_excel(file, sheet_name='PacketBodyDriving', usecols=lambda c: c in target_columns, engine='calamine')
         else:
-            df = pd.read_csv(file, sep=None, engine='python')
+            df = pd.read_csv(file, engine='pyarrow', usecols=lambda c: c in target_columns)
 
         if df.empty:
             st.warning(f"⚠️ {file.name}: 파일에 데이터가 없습니다.")
@@ -77,7 +79,7 @@ def load_data(file):
             st.error(f"❌ {file.name}: 'dataTime' 컬럼을 찾을 수 없습니다.")
             return None
 
-        dt_col = pd.to_datetime(df['dataTime'], errors='coerce') # 잘못된 형식은 NaT로 변환
+        dt_col = pd.to_datetime(df['dataTime'], errors='coerce', format='%Y-%m-%d %H:%M:%S') # 잘못된 형식은 NaT로 변환
 
         if dt_col.isna().all():
             st.error(f"❌ {file.name}: 'dataTime' 형식이 올바르지 않습니다.")
@@ -221,8 +223,17 @@ st.sidebar.header("⚙️ 분석 설정")
 @st.cache_data(show_spinner=False)
 def get_integrated_data(files):
     df_list = []
-    for file in files:
-        df_temp = load_data(file) # 앞서 수정한 메모리 최적화 load_data 함수 사용
+    total_files = len(files)
+    progress_bar = st.progress(0, text="데이터 통합을 준비 중입니다...")
+
+    for i, file in enumerate(files):
+        percent_complete = int(((i + 1) / total_files) * 100)
+        progress_bar.progress(
+            percent_complete,
+            text=f"데이터 추출 중... ⏳ ({i+1}/{total_files} 파일 완료 - {percent_complete}%)"
+        )
+
+        df_temp = load_data(file)
         if df_temp is not None and 'packetBodyDrivingId' in df_temp.columns:
             df_list.append(df_temp)
 
@@ -230,7 +241,10 @@ def get_integrated_data(files):
         gc.collect()
 
     if not df_list:
+        progress_bar.empty() # 에러 발생 시 진행률 바 숨기기
         return None
+
+    progress_bar.progress(100, text="✅ 파일 읽기 완료! 데이터를 하나로 병합하고 있습니다 (잠시만 기다려주세요)...")
 
     raw_df = pd.concat(df_list, ignore_index=True)
     del df_list
@@ -240,10 +254,12 @@ def get_integrated_data(files):
     raw_df = raw_df.dropna(subset=[target_col])
     raw_df = raw_df.drop_duplicates(subset=[target_col]).sort_values(target_col).reset_index(drop=True)
 
+    progress_bar.empty()
+
     return raw_df
 
 if uploaded_files:
-    with st.status("데이터 통합 및 전처리 중...", expanded=False) as status:
+    with st.status("데이터 통합 및 전처리 중...", expanded=True) as status:
         # 캐싱된 통합 함수 호출
         raw_df = get_integrated_data(uploaded_files)
 
@@ -550,7 +566,7 @@ if uploaded_files:
             .format("{:,}", subset=['데이터수'])
             .format("{:.1f}%", subset=[c for c in display_summary.columns if '비율' in c])
         )
-        with st.expander("ℹ️ 분석 기준 및 비율 계산 로직 안내", expanded=True):
+        with st.expander("ℹ️ 분석 기준 및 비율 계산 로직 안내", expanded=False):
             st.markdown(f"""
             본 대시보드의 거동 비율은 사이드바에서 설정하신 임계값(급가속G, 급제동G, 급선회G)을 기준으로 산출됩니다.
 
@@ -636,10 +652,23 @@ if uploaded_files:
         st.info("💡 분석할 기간의 시작 날짜와 종료 날짜를 입력하세요. (예: 2025-10-01)")
         mileage_cols = ["시작", "종료"]
 
-        if 'schedule_data' not in st.session_state:
-            st.session_state.schedule_data = {m: "" for m in mileage_cols}
+        if 'df' in locals() and not df.empty:
+            auto_start = df['dataTime'].min().strftime('%Y-%m-%d')
+            auto_end = df['dataTime'].max().strftime('%Y-%m-%d')
+        else:
+            auto_start = ""
+            auto_end = ""
 
-        input_df = pd.DataFrame([st.session_state.schedule_data])
+        if 'schedule_data' not in st.session_state:
+            st.session_state.schedule_data = {"시작": auto_start, "종료": auto_end}
+        elif auto_start and (st.session_state.schedule_data["시작"] == "" or st.session_state.get("last_data_count", 0) != len(df)):
+            st.session_state.schedule_data = {"시작": auto_start, "종료": auto_end}
+            st.session_state.last_data_count = len(df)
+
+        input_df = pd.DataFrame([{
+            "시작": st.session_state.schedule_data["시작"],
+            "종료": st.session_state.schedule_data["종료"]
+        }])
 
         edited_schedule = st.data_editor(
             input_df,
@@ -650,22 +679,17 @@ if uploaded_files:
             key="schedule_editor"
         )
 
-        is_input_complete = not (edited_schedule.values == "").any()
-
-        if is_input_complete:
-            if not df.empty:
+        if not edited_schedule.empty:
+            start_val = edited_schedule.iloc[0]["시작"]
+            end_val = edited_schedule.iloc[0]["종료"]
+            if start_val and end_val:
                 try:
                     analysis_df = df.copy()
-                    # analysis_df.columns = [c.strip() for c in analysis_df.columns] # 공백 제거
-                    # target_col = 'dataTimeDate'
-                    # if target_col not in analysis_df.columns:
-                    #     st.error(f"❌ 파일에 '{target_col}' 컬럼이 없습니다. (현재 컬럼: {list(analysis_df.columns)})")
                     if 'dataTime' not in analysis_df.columns:
                         st.error("❌ 파일에 'dataTime' 컬럼이 없습니다.")
                     else:
-                        # analysis_df['datetime'] = pd.to_datetime(analysis_df[target_col])
-                        start_dt = pd.to_datetime(edited_schedule.iloc[0]["시작"])
-                        end_dt = pd.to_datetime(edited_schedule.iloc[0]["종료"])
+                        start_dt = pd.to_datetime(start_val)
+                        end_dt = pd.to_datetime(end_val) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
 
                         mask = (analysis_df['dataTime'] >= start_dt) & (analysis_df['dataTime'] <= end_dt)
                         filtered_df = analysis_df.loc[mask]
@@ -917,3 +941,8 @@ if uploaded_files:
     #         plt.close(fig)
 else:
     st.info("👈 데이터를 업로드해주세요.")
+
+
+
+
+

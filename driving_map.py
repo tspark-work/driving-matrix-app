@@ -1,6 +1,9 @@
 #!/usr/bin/env python
 # coding: utf-8
 
+# In[ ]:
+
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -297,50 +300,74 @@ if uploaded_files:
     hard_brake_threshold = h_brk.number_input("급제동 G", 0.0, 1.0, 0.05)
     hard_turn_threshold = h_trn.number_input("급선회 G", 0.0, 1.0, 0.05)
 
-    # 필터링
-    # df = raw_df[(raw_df['speed'] >= speed_min) & (raw_df['accXG'].abs() <= g_max) & (raw_df['accYG'].abs() <= g_max)].copy()
-    df = raw_df[
-        (raw_df['speed'] >= speed_min) & (raw_df['speed'] <= speed_max) &
-        (raw_df['accXG'].abs() <= g_max) & (raw_df['accYG'].abs() <= g_max) &
-        (raw_df['yawDps'].abs() <= r_max) & (raw_df['pitchDps'].abs() <= r_max) & (raw_df['rollDps'].abs() <= r_max)
-        ].copy()
-
-    del raw_df
-    gc.collect()
-
-    if selected_case == "Case 2":
-        df_fix = df.copy()
-        df_fix['accXG'] = df['accXG'] * -1
-        df_fix['accYG'] = df['accYG'] * -1
-        df_fix['yawDps'] = df['yawDps'] * -1
-        df_fix['pitchDps'] = df['pitchDps'] * -1
-        df_fix['rollDps'] = df['rollDps'] * -1
-        df = df_fix
-
     unit_map = {"일 단위 (Daily)": 'date', "주 단위 (Weekly)": 'week', "요일 단위 (Day of Week)": 'day_name', "월 단위 (Monthly)": 'month', "전체 단위 (Overall)": 'overall'}
     group_col = unit_map[analysis_unit]
+    group_list = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'] if group_col == 'day_name' else sorted(raw_df[group_col].unique())
 
-    # 정렬 설정
-    group_list = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'] if group_col == 'day_name' else sorted(df[group_col].unique())
+    # 필터링
+    @st.cache_data(show_spinner=False)
+    def process_global_dataframe(raw_data, s_min, s_max, g_lim, r_lim, case_sel, g_col, h_acc, h_brk, h_trn):
+        # 1. 무거운 Boolean 필터링 연산
+        filtered = raw_data[
+            (raw_data['speed'] >= s_min) & (raw_data['speed'] <= s_max) &
+            (raw_data['accXG'].abs() <= g_lim) & (raw_data['accYG'].abs() <= g_lim) &
+            (raw_data['yawDps'].abs() <= r_lim) & (raw_data['pitchDps'].abs() <= r_lim) & (raw_data['rollDps'].abs() <= r_lim)
+        ].copy()
 
-    summary = df.groupby(group_col).agg(
-        평균속도=('speed', 'mean'),
-        최대속도=('speed', 'max'),
-        급가속횟수=('accXG', lambda x: (x > hard_accel_threshold).sum()),
-        급제동횟수=('accXG', lambda x: (x < -hard_brake_threshold).sum()),
-        급선회횟수=('accYG', lambda x: (x.abs() > hard_turn_threshold).sum()),
-        데이터수=('dataTime', 'count')
+        # 2. Case 2 반전 처리
+        if case_sel == "Case 2":
+            filtered['accXG'] *= -1
+            filtered['accYG'] *= -1
+            filtered['yawDps'] *= -1
+            filtered['pitchDps'] *= -1
+            filtered['rollDps'] *= -1
+
+        # 3. 벡터화 연산 (미리 판단)
+        filtered['is_accel'] = (filtered['accXG'] > h_acc).astype(int)
+        filtered['is_brake'] = (filtered['accXG'] < -h_brk).astype(int)
+        filtered['is_turn_L'] = (filtered['accYG'] > h_trn).astype(int)
+        filtered['is_turn_R'] = (filtered['accYG'] < -h_trn).astype(int)
+        filtered['is_turn_any'] = (filtered['accYG'].abs() > h_trn).astype(int)
+
+        # 4. 그룹바이 요약 (median 사용)
+        sum_df = filtered.groupby(g_col).agg(
+            평균속도=('speed', 'mean'),
+            최대분포속도=('speed', 'median'),
+            최대속도=('speed', 'max'),
+            급가속횟수=('is_accel', 'sum'),
+            급제동횟수=('is_brake', 'sum'),
+            급선회횟수=('is_turn_any', 'sum'),
+            데이터수=('dataTime', 'count')
+        )
+
+        # 5. 비율 계산
+        sum_df['가속_비율'] = (filtered.groupby(g_col)['is_accel'].mean() * 100).round(1)
+        sum_df['감속_비율'] = (filtered.groupby(g_col)['is_brake'].mean() * 100).round(1)
+        sum_df['정속_비율'] = (100 - sum_df['가속_비율'] - sum_df['감속_비율']).round(1)
+
+        sum_df['좌선회_비율'] = (filtered.groupby(g_col)['is_turn_L'].mean() * 100).round(1)
+        sum_df['우선회_비율'] = (filtered.groupby(g_col)['is_turn_R'].mean() * 100).round(1)
+        sum_df['직진_비율'] = (100 - sum_df['좌선회_비율'] - sum_df['우선회_비율']).round(1)
+
+        # 마모지수 산출 (가중치 적용)
+        sum_df['마모지수'] = (
+            (sum_df['급가속횟수'] * 0.5 + sum_df['급제동횟수'] * 0.7 + sum_df['급선회횟수'] * 1.0) /
+            sum_df['데이터수'].replace(0, 1) * 1000
+        ).round(2)
+
+        return filtered, sum_df
+
+    df, summary = process_global_dataframe(
+        raw_df, speed_min, speed_max, g_max, r_max, selected_case,
+        group_col, hard_accel_threshold, hard_brake_threshold, hard_turn_threshold
     )
 
-    # 마모지수 산출 (가중치 적용)
-    summary['마모지수'] = (
-        (summary['급가속횟수'] * 0.5 +
-         summary['급제동횟수'] * 0.7 +
-         summary['급선회횟수'] * 1.0) /
-        summary['데이터수'].replace(0, 1) * 1000
-    ).round(2)
-
     avg_wear_idx = float(summary['마모지수'].mean()) if not summary.empty else 1.0
+
+    # 🚨 탭2 마크다운용 변수 복구
+    acc_threshold = hard_accel_threshold
+    brk_threshold = hard_brake_threshold
+    turn_threshold = hard_turn_threshold
 
     # --- 4. 메인 분석 화면 ---
     tab1, tab2, tab3, tab4 = st.tabs(["📈 시각화 분석", "🔢 데이터 통계", "🛞 마모 인자 분석", "💥 운전 가혹도 분석"])
@@ -514,38 +541,6 @@ if uploaded_files:
                 #     st.pyplot(fig_rp, width="stretch")
                 #     plt.close(fig_rp)
 
-    def get_mode_speed(x):
-        if x.dropna().empty: return 0.0
-        return x.round(1).mode().iloc[0]
-
-    summary = df.groupby(group_col).agg(
-        평균속도=('speed', 'mean'),
-        최대속도=('speed', 'max'),
-        최대분포속도=('speed', get_mode_speed), # 최빈값 로직 적용
-        급가속횟수=('accXG', lambda x: (x > hard_accel_threshold).sum()),
-        급제동횟수=('accXG', lambda x: (x < -hard_brake_threshold).sum()),
-        급선회횟수=('accYG', lambda x: (x.abs() > hard_turn_threshold).sum()),
-        데이터수=('dataTime', 'count')
-    )
-
-    acc_threshold = hard_accel_threshold # 또는 hard_accel_threshold * 0.5 (유연한 판정 시)
-    brk_threshold = hard_brake_threshold
-
-    summary['가속_비율'] = df.groupby(group_col)['accXG'].apply(
-        lambda x: (x > acc_threshold).sum() / len(x) * 100).round(1)
-    summary['감속_비율'] = df.groupby(group_col)['accXG'].apply(
-        lambda x: (x < -brk_threshold).sum() / len(x) * 100).round(1)
-    summary['정속_비율'] = (100 - summary['가속_비율'] - summary['감속_비율']).round(1)
-
-    # 2. 횡방향 거동 분류 (사용자가 설정한 급선회 기준 활용)
-    turn_threshold = hard_turn_threshold
-
-    summary['좌선회_비율'] = df.groupby(group_col)['accYG'].apply(
-        lambda x: (x > turn_threshold).sum() / len(x) * 100).round(1)
-    summary['우선회_비율'] = df.groupby(group_col)['accYG'].apply(
-        lambda x: (x < -turn_threshold).sum() / len(x) * 100).round(1)
-    summary['직진_비율'] = (100 - summary['좌선회_비율'] - summary['우선회_비율']).round(1)
-
     with tab2:
         st.markdown("### 🔢 주행 그룹별 가혹도 및 거동 비율")
         display_cols = [
@@ -682,49 +677,176 @@ if uploaded_files:
         if not edited_schedule.empty:
             start_val = edited_schedule.iloc[0]["시작"]
             end_val = edited_schedule.iloc[0]["종료"]
+
             if start_val and end_val:
                 try:
-                    analysis_df = df.copy()
-                    if 'dataTime' not in analysis_df.columns:
-                        st.error("❌ 파일에 'dataTime' 컬럼이 없습니다.")
+                    current_trigger = f"{start_val}_{end_val}_{len(df)}"
+
+                    if st.session_state.get("last_analysis_trigger") != current_trigger:
+                        analysis_df = df.copy()
+                        if 'dataTime' in analysis_df.columns:
+                            start_dt = pd.to_datetime(start_val)
+                            end_dt = pd.to_datetime(end_val) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+
+                            mask = (analysis_df['dataTime'] >= start_dt) & (analysis_df['dataTime'] <= end_dt)
+                            filtered_df = analysis_df.loc[mask]
+
+                            if not filtered_df.empty:
+                                df_run = filtered_df[filtered_df['speed'] > speed_min].copy() if 'speed' in filtered_df.columns else filtered_df.copy()
+
+                                if not df_run.empty:
+                                    summary_cols = ["speed", "accXG", "accYG", "accZG", "yawDps", "rollDps", "pitchDps"]
+                                    rms_dict = {}
+                                    raw_rms_values = {}
+                                    for col in summary_cols:
+                                        if col in df_run.columns:
+                                            val = calc_rms(df_run[col])
+                                            raw_rms_values[col] = val
+                                            unit = "G" if "acc" in col else "dps" if "Dps" in col else "km/h"
+                                            rms_dict[col] = f"{val:.4f} {unit}" if "acc" in col else f"{val:.2f} {unit}"
+
+                                    p0, p40, p80 = get_speed_distribution(df_run)
+
+                                    # 계산된 무거운 결과들을 세션 상태에 모두 저장
+                                    st.session_state.tab3_rms_dict = rms_dict
+                                    st.session_state.tab3_raw_rms = raw_rms_values
+                                    st.session_state.tab3_dist = [{"시내 (0-40)": f"{p0:.1f}%", "일반 (40-80)": f"{p40:.1f}%", "고속 (80+)": f"{p80:.1f}%"}]
+                                    st.session_state.tab3_filtered_len = len(filtered_df)
+                                    st.session_state.last_analysis_trigger = current_trigger
+
+                    if "tab3_rms_dict" in st.session_state:
+                        st.success(f"✅ 구간 분석 완료 (데이터: {st.session_state.tab3_filtered_len}건)")
+                        st.divider()
+
+                        # 대시보드 테이블 출력 (단순 출력이라 0초 걸림)
+                        rms_horiz_df = pd.DataFrame([st.session_state.tab3_rms_dict])
+                        st.markdown("**📍 선택 기간 IMU RMS**")
+                        st.dataframe(rms_horiz_df.style.set_properties(**{'text-align': 'center', 'background-color': '#e1f5fe'}), width="stretch", hide_index=True)
+
+                        dist_df = pd.DataFrame(st.session_state.tab3_dist)
+                        st.markdown("**🛣️ 선택 기간 주행 속도 비율**")
+                        st.dataframe(dist_df.style.set_properties(**{'text-align': 'center'}), width="stretch", hide_index=True)
+
+                        # 예측 모델 영역
+                        st.divider()
+                        st.markdown("### 🤖 마모량(WI) 예측 모델")
+
+                        with st.expander("⚙️ 예측 수식 가중치(Gain) 실시간 조정", expanded=True):
+                            col_g1, col_g2, col_g3, col_g4 = st.columns(4)
+                            with col_g1:
+                                g_intercept = st.number_input("Intercept (상수항)", value=42343.0099, format="%.4f")
+                                g_accXG = st.number_input("accXG 계수", value=-791.5682, format="%.4f")
+                            with col_g2:
+                                g_accYG = st.number_input("accYG 계수", value=34776.3646, format="%.4f")
+                                g_accZG = st.number_input("accZG 계수", value=-42656.5477, format="%.4f")
+                            with col_g3:
+                                g_yaw = st.number_input("yawDps 계수", value=-6508.1880, format="%.4f")
+                                g_roll = st.number_input("rollDps 계수", value=310.2177, format="%.4f")
+                            with col_g4:
+                                g_pitch = st.number_input("pitchDps 계수", value=-6122.7138, format="%.4f")
+                                g_speed = st.number_input("speed 계수", value=421.3498, format="%.4f")
+
+                        loc = ["FL", "FR", "RL", "RR"]
+                        raw_rms = st.session_state.tab3_raw_rms
+
+                        if 'eval_data' not in st.session_state:
+                            st.session_state['eval_data'] = pd.DataFrame({
+                                "위치": loc,
+                                "실측 마모값": [0.0] * len(loc),
+                                "speed": [raw_rms.get('speed', 0)] * len(loc),
+                                "accXG": [raw_rms.get('accXG', 0)] * len(loc),
+                                "accYG": [raw_rms.get('accYG', 0)] * len(loc),
+                                "accZG": [raw_rms.get('accZG', 0)] * len(loc),
+                                "yawDps": [raw_rms.get('yawDps', 0)] * len(loc),
+                                "rollDps": [raw_rms.get('rollDps', 0)] * len(loc),
+                                "pitchDps": [raw_rms.get('pitchDps', 0)] * len(loc)
+                            })
+
+                        df_calc = st.session_state['eval_data'].copy()
+
+                        # 백그라운드 센서 데이터를 활용해 예측 마모값 계산
+                        df_calc['예측 마모값'] = (
+                            g_intercept
+                            + g_accXG * df_calc['accXG']
+                            + g_accYG * df_calc['accYG']
+                            + g_accZG * df_calc['accZG']
+                            + g_yaw * df_calc['yawDps']
+                            + g_roll * df_calc['rollDps']
+                            + g_pitch * df_calc['pitchDps']
+                            + g_speed * df_calc['speed']
+                        )
+
+                        df_calc['오차율(%)'] = df_calc.apply(
+                            lambda row: round((abs(row['실측 마모값'] - row['예측 마모값']) / row['실측 마모값'] * 100), 1) if row['실측 마모값'] != 0 else 0.0, axis=1
+                        )
+                        df_calc['예측율(%)'] = df_calc['오차율(%)'].apply(lambda x: max(0.0, round(100 - x, 1)))
+
+                        st.markdown("#### 📋 최종 신뢰도 평가 결과 레포트")
+
+                        display_cols = ['위치', '실측 마모값', '예측 마모값', '오차율(%)', '예측율(%)']
+
+                        # 양식 입력 격리
+                        with st.form(key="wear_input_form_fixed"):
+                            edited_display = st.data_editor(
+                                df_calc[display_cols],
+                                column_config={
+                                    "위치": st.column_config.TextColumn("위치", disabled=True),
+                                    "실측 마모값": st.column_config.NumberColumn("실측 마모값 (입력/수정)", format="%.1f"),
+                                    "예측 마모값": st.column_config.NumberColumn("예측 마모값 (자동계산)", disabled=True, format="%.1f"),
+                                    "오차율(%)": st.column_config.NumberColumn("오차율(%)", disabled=True, format="%.1f"),
+                                    "예측율(%)": st.column_config.NumberColumn("예측율(%)", disabled=True, format="%.1f")
+                                },
+                                hide_index=True,
+                            )
+                            submit_wear = st.form_submit_button("💾 실측값 반영 및 그래프 갱신")
+
+                        if submit_wear:
+                            if not edited_display['실측 마모값'].equals(st.session_state['eval_data']['실측 마모값']):
+                                st.session_state['eval_data']['실측 마모값'] = edited_display['실측 마모값'].values
+                                st.user_triggered_trend = True # 플래그 설정
+                                st.rerun()
+
+                        # ---------------------------------------------------------
+                        # 5. 비교 그래프 렌더링
+                        # ---------------------------------------------------------
+                        avg_accuracy = edited_display['예측율(%)'].mean()
+                        st.markdown(f"**종합 평균 예측율: {avg_accuracy:.1f}%**")
+
+                        fig_compare = go.Figure()
+                        min_val = min(edited_display['예측 마모값'].min(), edited_display['실측 마모값'].min()) * 0.9
+                        max_val = max(edited_display['예측 마모값'].max(), edited_display['실측 마모값'].max()) * 1.1
+                        if pd.isna(min_val) or np.isinf(min_val): min_val = 0
+                        if pd.isna(max_val) or np.isinf(max_val): max_val = 40000
+
+                        fig_compare.add_trace(go.Scatter(
+                            x=[min_val, max_val], y=[min_val, max_val],
+                            mode='lines', name='Ideal Line (Y = X)',
+                            line=dict(color='rgba(214, 39, 40, 0.6)', width=2, dash='dash'),
+                            hovertemplate="기준선 (추정 = 실측)<extra></extra>"
+                        ))
+
+                        colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#9467bd']
+                        for i, row in edited_display.iterrows():
+                            fig_compare.add_trace(go.Scatter(
+                                x=[row['예측 마모값']], y=[row['실측 마모값']],
+                                mode='markers+text', name=f"{row['위치']} 위치",
+                                marker=dict(size=14, color=colors[i % len(colors)], line=dict(width=2, color='White'), opacity=0.9),
+                                hovertemplate=f"<b>{row['위치']} 위치</b><br>추정 마모량: %{{x:,.1f}}<br>실측 마모량: %{{y:,.1f}}<br>예측율: {row['예측율(%)']}%<extra></extra>"
+                            ))
+
+                        fig_compare.update_layout(
+                            title="🔮 마모 지수(WI) 추정치 vs 실측치 신뢰도 평가",
+                            xaxis_title="수식 추정 마모량 (Predicted WI)", yaxis_title="실제 계측 마모량 (Actual WI)",
+                            xaxis=dict(range=[min_val, max_val], gridcolor='rgba(200,200,200,0.15)', zeroline=False),
+                            yaxis=dict(range=[min_val, max_val], gridcolor='rgba(200,200,200,0.15)', zeroline=False),
+                            legend=dict(title="분석 위치", x=0.01, y=0.99, bgcolor="rgba(255,255,255,0.85)"),
+                            margin=dict(l=50, r=40, t=60, b=50), hovermode="closest", width=700, height=500
+                        )
+                        st.plotly_chart(fig_compare, width="stretch")
                     else:
-                        start_dt = pd.to_datetime(start_val)
-                        end_dt = pd.to_datetime(end_val) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
-
-                        mask = (analysis_df['dataTime'] >= start_dt) & (analysis_df['dataTime'] <= end_dt)
-                        filtered_df = analysis_df.loc[mask]
-
-                        if filtered_df.empty:
-                            st.error(f"❌ {start_dt.date()} ~ {end_dt.date()} 기간 내에 데이터가 없습니다.")
-                        else:
-                            st.success(f"✅ {start_dt.date()} ~ {end_dt.date()} 구간 분석 완료 (데이터: {len(filtered_df)}건)")
-                            st.divider()
-
-                            df_run = filtered_df[filtered_df['speed'] > speed_min].copy() if 'speed' in filtered_df.columns else filtered_df.copy()
-
-                            if df_run.empty:
-                                st.warning(f"⚠️ 해당 기간 내 주행 데이터({speed_min}km/h 이상)가 없습니다.")
-                            else:
-                                summary_cols = ["speed", "accXG", "accYG", "accZG", "yawDps", "rollDps", "pitchDps"]
-                                rms_dict = {}
-                                for col in summary_cols:
-                                    if col in df_run.columns:
-                                        val = calc_rms(df_run[col])
-                                        unit = "G" if "acc" in col else "dps" if "Dps" in col else "km/h"
-                                        rms_dict[col] = f"{val:.4f} {unit}" if "acc" in col else f"{val:.2f} {unit}"
-
-                                rms_horiz_df = pd.DataFrame([rms_dict])
-
-                                st.markdown("**📍 선택 기간 IMU RMS**")
-                                st.dataframe(
-                                    rms_horiz_df.style.set_properties(**{'text-align': 'center', 'background-color': '#e1f5fe'}),
-                                    width="stretch",
-                                    hide_index=True
-                                )
-                                p0, p40, p80 = get_speed_distribution(df_run)
-                                dist_df = pd.DataFrame([{"시내 (0-40)": f"{p0:.1f}%", "일반 (40-80)": f"{p40:.1f}%", "고속 (80+)": f"{p80:.1f}%"}])
-                                st.markdown("**🛣️ 선택 기간 주행 속도 비율**")
-                                st.dataframe(dist_df.style.set_properties(**{'text-align': 'center'}), width="stretch", hide_index=True)
+                        st.warning("⚠️ 주행 데이터 기간 필터링 연산에 실패했거나 데이터가 비어있습니다.")
+                except Exception as e:
+                    st.error(f"날짜 처리 오류: {e}")
 
                 except Exception as e:
                     st.error(f"날짜 처리 오류: {e}")
@@ -753,49 +875,43 @@ if uploaded_files:
             run_analysis = st.button("🚀 분석 실행")
 
             if run_analysis:
-                with st.spinner("가혹도 통계량을 계산 중입니다..."):
-                    # --- 1. 데이터 추출 및 필터 적용 (벡터화 연산으로 속도 향상) ---
+                with st.spinner("가혹도 통계량을 초고속 계산 중입니다..."):
+                    # --- 1. 데이터 추출 및 필터 적용 (기존 유지) ---
                     analysis_df = df[['accXG', 'accYG', 'yawDps']].copy()
 
-                    # SciPy medfilt 대신 Pandas의 rolling.median()이 대용량 데이터에서 안정적일 수 있습니다.
-                    analysis_df['accXG(Filter)'] = (analysis_df['accXG'].rolling(window=median_window, center=True).median().ffill().bfill())
-                    analysis_df['accYG(Filter)'] = (analysis_df['accYG'].rolling(window=median_window, center=True).median().ffill().bfill())
-                    analysis_df['yawDps(Filter)'] = (analysis_df['yawDps'].rolling(window=median_window, center=True).median().ffill().bfill())
+                    analysis_df['accXG(Filter)'] = analysis_df['accXG'].rolling(window=median_window, center=True).median().ffill().bfill()
+                    analysis_df['accYG(Filter)'] = analysis_df['accYG'].rolling(window=median_window, center=True).median().ffill().bfill()
+                    analysis_df['yawDps(Filter)'] = analysis_df['yawDps'].rolling(window=median_window, center=True).median().ffill().bfill()
 
-                    # --- 2. 윈도우별 통계량 계산 (슬라이딩 윈도우 최적화) ---
-                    rows = []
-                    # 리스트 컴프리헨션이나 벡터 연산이 좋지만, 가독성을 위해 루프 유지하되 연산 최소화
-                    for i in range(0, len(analysis_df) - window_size + 1, step_size):
-                        w_orig = analysis_df.iloc[i : i + window_size]
+                    # --- 2. 윈도우별 통계량 계산 (★for 루프 제거, 100% 벡터화 연산) ---
+                    # 롤링 윈도우 설정
+                    roller = analysis_df.rolling(window=window_size, center=False)
 
-                        curr_row = {
-                            'accXG': w_orig['accXG'].iloc[-1],
-                            'accYG': w_orig['accYG'].iloc[-1],
-                            'yawDps': w_orig['yawDps'].iloc[-1],
-                            'accXG(Filter)': w_orig['accXG(Filter)'].iloc[-1],
-                            'accYG(Filter)': w_orig['accYG(Filter)'].iloc[-1],
-                            'yawDps(Filter)': w_orig['yawDps(Filter)'].iloc[-1]
-                        }
+                    # 각 지표별 통계량 한 번에 연산
+                    res_dict = {}
+                    for name in ['accXG', 'accYG', 'yawDps']:
+                        f_col = f'{name}(Filter)'
+                        res_dict[name] = analysis_df[name]
+                        res_dict[f_col] = analysis_df[f_col]
 
-                        for name in ['accXG', 'accYG', 'yawDps']:
-                            data = w_orig[f'{name}(Filter)'].values
-                            # RMS
-                            curr_row[f'{name}(rms)'] = np.sqrt(np.mean(data**2))
-                            # STD
-                            curr_row[f'{name}(STD)'] = np.std(data)
-                            # Jerk
-                            curr_row[f'{name}(jerk)'] = np.max(np.abs(np.diff(data))) / dt
+                        # RMS = sqrt( mean(x^2) )
+                        res_dict[f'{name}(rms)'] = np.sqrt((analysis_df[f_col]**2).rolling(window=window_size).mean())
+                        # STD
+                        res_dict[f'{name}(STD)'] = roller[f_col].std(ddof=0)
+                        # Jerk = Max(Abs(Diff)) / dt
+                        res_dict[f'{name}(jerk)'] = analysis_df[f_col].diff().abs().rolling(window=window_size - 1).max() / dt
 
-                        rows.append(curr_row)
-
-                    result_df = pd.DataFrame(rows)
-                    st.session_state.tab4_result = result_df # 세션에 저장하여 재렌더링 방지
+                    # 딕셔너리를 데이터프레임으로 변환
+                    result_df = pd.DataFrame(res_dict)
+                    result_df = result_df.iloc[window_size - 1 : : step_size].dropna().reset_index(drop=True)
+                    st.session_state.tab4_result = result_df
 
                 st.success(f"✅ 분석 완료! (총 {len(result_df)}개의 데이터 포인트)")
 
                 # --- 3. 출력 및 시각화 ---
+            if 'tab4_result' in st.session_state:
                 st.subheader("📈 가혹도 분석 결과 테이블")
-                st.dataframe(result_df, width="stretch", height=400)
+                st.dataframe(st.session_state.tab4_result, width="stretch", height=400)
 
                 # st.divider()
                 # st.subheader("📉 주요 지표 시계열 확인")
@@ -942,6 +1058,8 @@ if uploaded_files:
 else:
     st.info("👈 데이터를 업로드해주세요.")
 
+
+# In[ ]:
 
 
 

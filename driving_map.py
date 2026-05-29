@@ -19,6 +19,7 @@ from matplotlib.colors import LogNorm
 from mpl_toolkits.mplot3d import Axes3D
 from scipy.signal import medfilt
 import gc
+from ui_components import render_tire_gain_inputs, render_wear_comparison_chart
 
 # --- 0. 환경 설정 ---
 def set_korean_font():
@@ -731,20 +732,7 @@ if uploaded_files:
                         st.divider()
                         st.markdown("### 🤖 마모량(WI) 예측 모델")
 
-                        with st.expander("⚙️ 예측 수식 가중치(Gain) 실시간 조정", expanded=True):
-                            col_g1, col_g2, col_g3, col_g4 = st.columns(4)
-                            with col_g1:
-                                g_intercept = st.number_input("Intercept (상수항)", value=42343.0099, format="%.4f")
-                                g_accXG = st.number_input("accXG 계수", value=-791.5682, format="%.4f")
-                            with col_g2:
-                                g_accYG = st.number_input("accYG 계수", value=34776.3646, format="%.4f")
-                                g_accZG = st.number_input("accZG 계수", value=-42656.5477, format="%.4f")
-                            with col_g3:
-                                g_yaw = st.number_input("yawDps 계수", value=-6508.1880, format="%.4f")
-                                g_roll = st.number_input("rollDps 계수", value=310.2177, format="%.4f")
-                            with col_g4:
-                                g_pitch = st.number_input("pitchDps 계수", value=-6122.7138, format="%.4f")
-                                g_speed = st.number_input("speed 계수", value=421.3498, format="%.4f")
+                        g_weights = render_tire_gain_inputs()
 
                         loc = ["FL", "FR", "RL", "RR"]
                         raw_rms = st.session_state.tab3_raw_rms
@@ -764,16 +752,30 @@ if uploaded_files:
 
                         df_calc = st.session_state['eval_data'].copy()
 
-                        # 백그라운드 센서 데이터를 활용해 예측 마모값 계산
+                        # ---------------------------------------------------------
+                        # 🛞 타이어 위치별 독립 가중치(Gain) 매핑 연산
+                        # ---------------------------------------------------------
+                        # 각 행의 '위치'(FL, FR, RL, RR)를 기반으로 UI에서 설정한 독립 계수들을 배열로 매핑합니다.
+                        # .map()을 활용해 판다스 내부 C-엔진에서 한 번에 매핑하므로 속도가 저하되지 않습니다.
+                        w_int   = df_calc['위치'].map(lambda p: g_weights[p]['int'])
+                        w_accX  = df_calc['위치'].map(lambda p: g_weights[p]['x'])
+                        w_accY  = df_calc['위치'].map(lambda p: g_weights[p]['y'])
+                        w_accZ  = df_calc['위치'].map(lambda p: g_weights[p]['z'])
+                        w_yaw   = df_calc['위치'].map(lambda p: g_weights[p]['yaw'])
+                        w_roll  = df_calc['위치'].map(lambda p: g_weights[p]['roll'])
+                        w_pitch = df_calc['위치'].map(lambda p: g_weights[p]['pitch'])
+                        w_speed = df_calc['위치'].map(lambda p: g_weights[p]['speed'])
+
+                        # 위치별 고유 계수가 적용된 다중 선형 회귀 예측 수식 연산
                         df_calc['예측 마모값'] = (
-                            g_intercept
-                            + g_accXG * df_calc['accXG']
-                            + g_accYG * df_calc['accYG']
-                            + g_accZG * df_calc['accZG']
-                            + g_yaw * df_calc['yawDps']
-                            + g_roll * df_calc['rollDps']
-                            + g_pitch * df_calc['pitchDps']
-                            + g_speed * df_calc['speed']
+                            w_int
+                            + w_accX  * df_calc['accXG']
+                            + w_accY  * df_calc['accYG']
+                            + w_accZ  * df_calc['accZG']
+                            + w_yaw   * df_calc['yawDps']
+                            + w_roll  * df_calc['rollDps']
+                            + w_pitch * df_calc['pitchDps']
+                            + w_speed * df_calc['speed']
                         )
 
                         df_calc['오차율(%)'] = df_calc.apply(
@@ -809,40 +811,7 @@ if uploaded_files:
                         # ---------------------------------------------------------
                         # 5. 비교 그래프 렌더링
                         # ---------------------------------------------------------
-                        avg_accuracy = edited_display['예측율(%)'].mean()
-                        st.markdown(f"**종합 평균 예측율: {avg_accuracy:.1f}%**")
-
-                        fig_compare = go.Figure()
-                        min_val = min(edited_display['예측 마모값'].min(), edited_display['실측 마모값'].min()) * 0.9
-                        max_val = max(edited_display['예측 마모값'].max(), edited_display['실측 마모값'].max()) * 1.1
-                        if pd.isna(min_val) or np.isinf(min_val): min_val = 0
-                        if pd.isna(max_val) or np.isinf(max_val): max_val = 40000
-
-                        fig_compare.add_trace(go.Scatter(
-                            x=[min_val, max_val], y=[min_val, max_val],
-                            mode='lines', name='Ideal Line (Y = X)',
-                            line=dict(color='rgba(214, 39, 40, 0.6)', width=2, dash='dash'),
-                            hovertemplate="기준선 (추정 = 실측)<extra></extra>"
-                        ))
-
-                        colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#9467bd']
-                        for i, row in edited_display.iterrows():
-                            fig_compare.add_trace(go.Scatter(
-                                x=[row['예측 마모값']], y=[row['실측 마모값']],
-                                mode='markers+text', name=f"{row['위치']} 위치",
-                                marker=dict(size=14, color=colors[i % len(colors)], line=dict(width=2, color='White'), opacity=0.9),
-                                hovertemplate=f"<b>{row['위치']} 위치</b><br>추정 마모량: %{{x:,.1f}}<br>실측 마모량: %{{y:,.1f}}<br>예측율: {row['예측율(%)']}%<extra></extra>"
-                            ))
-
-                        fig_compare.update_layout(
-                            title="🔮 마모 지수(WI) 추정치 vs 실측치 신뢰도 평가",
-                            xaxis_title="수식 추정 마모량 (Predicted WI)", yaxis_title="실제 계측 마모량 (Actual WI)",
-                            xaxis=dict(range=[min_val, max_val], gridcolor='rgba(200,200,200,0.15)', zeroline=False),
-                            yaxis=dict(range=[min_val, max_val], gridcolor='rgba(200,200,200,0.15)', zeroline=False),
-                            legend=dict(title="분석 위치", x=0.01, y=0.99, bgcolor="rgba(255,255,255,0.85)"),
-                            margin=dict(l=50, r=40, t=60, b=50), hovermode="closest", width=700, height=500
-                        )
-                        st.plotly_chart(fig_compare, width="stretch")
+                        render_wear_comparison_chart(edited_display)
                     else:
                         st.warning("⚠️ 주행 데이터 기간 필터링 연산에 실패했거나 데이터가 비어있습니다.")
                 except Exception as e:

@@ -719,13 +719,12 @@ if uploaded_files:
                     current_trigger = f"{start_val}_{end_val}_{len(df)}"
 
                     if st.session_state.get("last_analysis_trigger") != current_trigger:
-                        analysis_df = df.copy()
-                        if 'dataTime' in analysis_df.columns:
+                        if 'dataTime' in df.columns:
                             start_dt = pd.to_datetime(start_val)
                             end_dt = pd.to_datetime(end_val) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
 
-                            mask = (analysis_df['dataTime'] >= start_dt) & (analysis_df['dataTime'] <= end_dt)
-                            filtered_df = analysis_df.loc[mask]
+                            mask = (df['dataTime'] >= start_dt) & (df['dataTime'] <= end_dt)
+                            filtered_df = df.loc[mask]
 
                             if not filtered_df.empty:
                                 df_run = filtered_df[filtered_df['speed'] > speed_min].copy() if 'speed' in filtered_df.columns else filtered_df.copy()

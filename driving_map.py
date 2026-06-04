@@ -20,9 +20,19 @@ from mpl_toolkits.mplot3d import Axes3D
 from scipy.signal import medfilt
 import gc
 from ui_components import render_tire_gain_inputs, render_wear_comparison_chart
+import logging
+import traceback
 
 plt.close('all')
 gc.collect()
+
+logging.basicConfig(
+    filename='app_debug.log',      # 로그 파일 이름
+    filemode='a',                  # 'a'는 누적(Append), 'w'는 매번 덮어쓰기
+    format='[%(asctime)s] %(levelname)s: %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
+    level=logging.INFO             # INFO 레벨 이상(WARNING, ERROR 등) 모두 기록
+)
 
 # --- 0. 환경 설정 ---
 def set_korean_font():

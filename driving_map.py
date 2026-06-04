@@ -206,17 +206,23 @@ if 'uploader_key' not in st.session_state:
 
 def clear_all_data():
     st.cache_data.clear()
-    keys_to_keep = {'uploader_key'}
-    current_keys = list(st.session_state.keys())
+    st.cache_resource.clear()  # 리소스 캐시까지 함께 청소
 
-    for key in current_keys:
-        if key not in keys_to_keep:
+    analysis_keys = [
+        'all_data', 'tab4_result', 'tab3_raw_rms', 'tab3_rms_dict',
+        'tab3_dist', 'eval_data', 'last_analysis_trigger'
+    ]
+
+    for key in analysis_keys:
+        if key in st.session_state:
+            st.session_state[key] = pd.DataFrame() # 빈 객체로 대체하여 기존 대용량 메모리 링크 파괴
             del st.session_state[key]
 
-    st.session_state.all_data = pd.DataFrame()
     st.session_state.uploader_key += 1
-    import gc
     gc.collect()
+    gc.collect(0)
+    gc.collect(1)
+    gc.collect(2) # 가장 오래 살아남은 메모리(Generation 2) 영역까지 싹 청소
 
 with st.sidebar:
     st.header("⚙️ 데이터 관리")

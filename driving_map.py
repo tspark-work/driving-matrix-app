@@ -27,11 +27,9 @@ plt.close('all')
 gc.collect()
 
 logging.basicConfig(
-    filename='app_debug.log',      # 로그 파일 이름
-    filemode='a',                  # 'a'는 누적(Append), 'w'는 매번 덮어쓰기
+    level=logging.INFO,
     format='[%(asctime)s] %(levelname)s: %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S',
-    level=logging.INFO             # INFO 레벨 이상(WARNING, ERROR 등) 모두 기록
+    datefmt='%Y-%m-%d %H:%M:%S'
 )
 
 # --- 0. 환경 설정 ---

@@ -102,10 +102,14 @@ def load_data(file):
 
         df['dataTime'] = dt_col
         df['date'] = dt_col.dt.date
-        df['month'] = dt_col.dt.to_period('M').astype(str)
-        df['week'] = "Week " + dt_col.dt.isocalendar().week.astype(str)
-        df['day_name'] = dt_col.dt.day_name()
-        df['overall'] = "전체 기간 (Overall)"
+        # df['month'] = dt_col.dt.to_period('M').astype(str)
+        # df['week'] = "Week " + dt_col.dt.isocalendar().week.astype(str)
+        # df['day_name'] = dt_col.dt.day_name()
+        # df['overall'] = "전체 기간 (Overall)"
+        df['month'] = dt_col.dt.to_period('M').astype(str).astype('category')
+        df['week'] = ("Week " + dt_col.dt.isocalendar().week.astype(str)).astype('category')
+        df['day_name'] = dt_col.dt.day_name().astype('category')
+        df['overall'] = pd.Series(["전체 기간 (Overall)"] * len(df), dtype='category')
 
         # float64 타입을 float32로 변환하여 메모리 반토막 내기
         float_cols = df.select_dtypes(include=['float64']).columns
@@ -349,11 +353,17 @@ if uploaded_files:
             filtered['rollDps'] *= -1
 
         # 3. 벡터화 연산 (미리 판단)
-        filtered['is_accel'] = (filtered['accXG'] > h_acc).astype(int)
-        filtered['is_brake'] = (filtered['accXG'] < -h_brk).astype(int)
-        filtered['is_turn_L'] = (filtered['accYG'] > h_trn).astype(int)
-        filtered['is_turn_R'] = (filtered['accYG'] < -h_trn).astype(int)
-        filtered['is_turn_any'] = (filtered['accYG'].abs() > h_trn).astype(int)
+        # filtered['is_accel'] = (filtered['accXG'] > h_acc).astype(int)
+        # filtered['is_brake'] = (filtered['accXG'] < -h_brk).astype(int)
+        # filtered['is_turn_L'] = (filtered['accYG'] > h_trn).astype(int)
+        # filtered['is_turn_R'] = (filtered['accYG'] < -h_trn).astype(int)
+        # filtered['is_turn_any'] = (filtered['accYG'].abs() > h_trn).astype(int)
+
+        filtered['is_accel'] = filtered['accXG'] > h_acc
+        filtered['is_brake'] = filtered['accXG'] < -h_brk
+        filtered['is_turn_L'] = filtered['accYG'] > h_trn
+        filtered['is_turn_R'] = filtered['accYG'] < -h_trn
+        filtered['is_turn_any'] = filtered['accYG'].abs() > h_trn
 
         # 4. 그룹바이 요약 (median 사용)
         sum_df = filtered.groupby(g_col).agg(
@@ -871,9 +881,12 @@ if uploaded_files:
                     # --- 1. 데이터 추출 및 필터 적용 (기존 유지) ---
                     analysis_df = df[['accXG', 'accYG', 'yawDps']].copy()
 
-                    analysis_df['accXG(Filter)'] = analysis_df['accXG'].rolling(window=median_window, center=True).median().ffill().bfill()
-                    analysis_df['accYG(Filter)'] = analysis_df['accYG'].rolling(window=median_window, center=True).median().ffill().bfill()
-                    analysis_df['yawDps(Filter)'] = analysis_df['yawDps'].rolling(window=median_window, center=True).median().ffill().bfill()
+                    # analysis_df['accXG(Filter)'] = analysis_df['accXG'].rolling(window=median_window, center=True).median().ffill().bfill()
+                    # analysis_df['accYG(Filter)'] = analysis_df['accYG'].rolling(window=median_window, center=True).median().ffill().bfill()
+                    # analysis_df['yawDps(Filter)'] = analysis_df['yawDps'].rolling(window=median_window, center=True).median().ffill().bfill()
+                    analysis_df['accXG(Filter)'] = medfilt(analysis_df['accXG'].to_numpy(), kernel_size=median_window)
+                    analysis_df['accYG(Filter)'] = medfilt(analysis_df['accYG'].to_numpy(), kernel_size=median_window)
+                    analysis_df['yawDps(Filter)'] = medfilt(analysis_df['yawDps'].to_numpy(), kernel_size=median_window)
 
                     # --- 2. 윈도우별 통계량 계산 (★for 루프 제거, 100% 벡터화 연산) ---
                     # 롤링 윈도우 설정

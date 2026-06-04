@@ -21,6 +21,9 @@ from scipy.signal import medfilt
 import gc
 from ui_components import render_tire_gain_inputs, render_wear_comparison_chart
 
+plt.close('all')
+gc.collect()
+
 # --- 0. 환경 설정 ---
 def set_korean_font():
     sys_plat = platform.system()
@@ -238,7 +241,7 @@ with st.sidebar:
 
 st.sidebar.header("⚙️ 분석 설정")
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=1)
 def get_integrated_data(files):
     df_list = []
     total_files = len(files)
@@ -320,7 +323,7 @@ if uploaded_files:
     group_list = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'] if group_col == 'day_name' else sorted(raw_df[group_col].unique())
 
     # 필터링
-    @st.cache_data(show_spinner=False)
+    @st.cache_data(show_spinner=False, max_entries=1)
     def process_global_dataframe(raw_data, s_min, s_max, g_lim, r_lim, case_sel, g_col, h_acc, h_brk, h_trn):
         # 1. 무거운 Boolean 필터링 연산
         filtered = raw_data[
@@ -769,8 +772,6 @@ if uploaded_files:
                         # ---------------------------------------------------------
                         # 🛞 타이어 위치별 독립 가중치(Gain) 매핑 연산
                         # ---------------------------------------------------------
-                        # 각 행의 '위치'(FL, FR, RL, RR)를 기반으로 UI에서 설정한 독립 계수들을 배열로 매핑합니다.
-                        # .map()을 활용해 판다스 내부 C-엔진에서 한 번에 매핑하므로 속도가 저하되지 않습니다.
                         w_int   = df_calc['위치'].map(lambda p: g_weights[p]['int'])
                         w_accX  = df_calc['위치'].map(lambda p: g_weights[p]['x'])
                         w_accY  = df_calc['위치'].map(lambda p: g_weights[p]['y'])

@@ -205,10 +205,18 @@ if 'uploader_key' not in st.session_state:
     st.session_state.uploader_key = 0
 
 def clear_all_data():
+    st.cache_data.clear()
+    keys_to_keep = {'uploader_key'}
+    current_keys = list(st.session_state.keys())
+
+    for key in current_keys:
+        if key not in keys_to_keep:
+            del st.session_state[key]
+
     st.session_state.all_data = pd.DataFrame()
     st.session_state.uploader_key += 1
-    if 'uploaded_file' in st.session_state:
-        del st.session_state.uploaded_file
+    import gc
+    gc.collect()
 
 with st.sidebar:
     st.header("⚙️ 데이터 관리")

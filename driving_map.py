@@ -225,7 +225,8 @@ def clear_all_data():
 
     analysis_keys = [
         'all_data', 'tab4_result', 'tab3_raw_rms', 'tab3_rms_dict',
-        'tab3_dist', 'eval_data', 'last_analysis_trigger'
+        'tab3_dist', 'eval_data', 'last_analysis_trigger',
+        'df', 'summary'
     ]
 
     for key in analysis_keys:
@@ -254,12 +255,12 @@ with st.sidebar:
 st.sidebar.header("⚙️ 분석 설정")
 
 @st.cache_data(show_spinner=False, max_entries=1)
-def get_integrated_data(files):
+def get_integrated_data(_files, file_keys):  # _files: 실제 파일 객체 (캐시 키 제외), file_keys: 캐시 키용 튜플
     df_list = []
-    total_files = len(files)
+    total_files = len(_files)
     progress_bar = st.progress(0, text="데이터 통합을 준비 중입니다...")
 
-    for i, file in enumerate(files):
+    for i, file in enumerate(_files):          # ← _files 사용
         percent_complete = int(((i + 1) / total_files) * 100)
         progress_bar.progress(
             percent_complete,
@@ -274,10 +275,10 @@ def get_integrated_data(files):
         gc.collect()
 
     if not df_list:
-        progress_bar.empty() # 에러 발생 시 진행률 바 숨기기
+        progress_bar.empty()
         return None
 
-    progress_bar.progress(100, text="✅ 파일 읽기 완료! 데이터를 하나로 병합하고 있습니다 (잠시만 기다려주세요)...")
+    progress_bar.progress(100, text="✅ 파일 읽기 완료! 데이터를 하나로 병합하고 있습니다...")
 
     raw_df = pd.concat(df_list, ignore_index=True)
     del df_list
@@ -288,13 +289,13 @@ def get_integrated_data(files):
     raw_df = raw_df.drop_duplicates(subset=[target_col]).sort_values(target_col).reset_index(drop=True)
 
     progress_bar.empty()
-
     return raw_df
 
 if uploaded_files:
     with st.status("데이터 통합 및 전처리 중...", expanded=True) as status:
         # 캐싱된 통합 함수 호출
-        raw_df = get_integrated_data(uploaded_files)
+        file_keys = tuple((f.name, f.size) for f in uploaded_files)
+        raw_df = get_integrated_data(uploaded_files, file_keys)
 
         if raw_df is None or raw_df.empty:
             status.update(label="통합 실패: 유효한 파일이 없습니다.", state="error")
@@ -337,27 +338,18 @@ if uploaded_files:
     # 필터링
     @st.cache_data(show_spinner=False, max_entries=1)
     def process_global_dataframe(raw_data, s_min, s_max, g_lim, r_lim, case_sel, g_col, h_acc, h_brk, h_trn):
-        # 1. 무거운 Boolean 필터링 연산
-        filtered = raw_data[
-            (raw_data['speed'] >= s_min) & (raw_data['speed'] <= s_max) &
-            (raw_data['accXG'].abs() <= g_lim) & (raw_data['accYG'].abs() <= g_lim) &
-            (raw_data['yawDps'].abs() <= r_lim) & (raw_data['pitchDps'].abs() <= r_lim) & (raw_data['rollDps'].abs() <= r_lim)
-        ].copy()
+        mask = ((raw_data['speed'] >= s_min) & (raw_data['speed'] <= s_max) &
+                (raw_data['accXG'].abs() <= g_lim) & (raw_data['accYG'].abs() <= g_lim) &
+                (raw_data['yawDps'].abs() <= r_lim) & (raw_data['pitchDps'].abs() <= r_lim) & (raw_data['rollDps'].abs() <= r_lim))
+        filtered = raw_data.loc[mask]
 
         # 2. Case 2 반전 처리
         if case_sel == "Case 2":
-            filtered['accXG'] *= -1
-            filtered['accYG'] *= -1
-            filtered['yawDps'] *= -1
-            filtered['pitchDps'] *= -1
-            filtered['rollDps'] *= -1
-
-        # 3. 벡터화 연산 (미리 판단)
-        # filtered['is_accel'] = (filtered['accXG'] > h_acc).astype(int)
-        # filtered['is_brake'] = (filtered['accXG'] < -h_brk).astype(int)
-        # filtered['is_turn_L'] = (filtered['accYG'] > h_trn).astype(int)
-        # filtered['is_turn_R'] = (filtered['accYG'] < -h_trn).astype(int)
-        # filtered['is_turn_any'] = (filtered['accYG'].abs() > h_trn).astype(int)
+            cols_to_flip = ['accXG', 'accYG', 'yawDps', 'pitchDps', 'rollDps']
+            filtered = filtered.copy()
+            filtered[cols_to_flip] *= -1
+        else:
+            filtered = filtered.copy()
 
         filtered['is_accel'] = filtered['accXG'] > h_acc
         filtered['is_brake'] = filtered['accXG'] < -h_brk
@@ -366,7 +358,7 @@ if uploaded_files:
         filtered['is_turn_any'] = filtered['accYG'].abs() > h_trn
 
         # 4. 그룹바이 요약 (median 사용)
-        sum_df = filtered.groupby(g_col).agg(
+        sum_df = filtered.groupby(g_col, observed=True).agg(
             평균속도=('speed', 'mean'),
             최대분포속도=('speed', 'median'),
             최대속도=('speed', 'max'),
@@ -377,12 +369,12 @@ if uploaded_files:
         )
 
         # 5. 비율 계산
-        sum_df['가속_비율'] = (filtered.groupby(g_col)['is_accel'].mean() * 100).round(1)
-        sum_df['감속_비율'] = (filtered.groupby(g_col)['is_brake'].mean() * 100).round(1)
+        sum_df['가속_비율'] = (filtered.groupby(g_col, observed=True)['is_accel'].mean() * 100).round(1)
+        sum_df['감속_비율'] = (filtered.groupby(g_col, observed=True)['is_brake'].mean() * 100).round(1)
         sum_df['정속_비율'] = (100 - sum_df['가속_비율'] - sum_df['감속_비율']).round(1)
 
-        sum_df['좌선회_비율'] = (filtered.groupby(g_col)['is_turn_L'].mean() * 100).round(1)
-        sum_df['우선회_비율'] = (filtered.groupby(g_col)['is_turn_R'].mean() * 100).round(1)
+        sum_df['좌선회_비율'] = (filtered.groupby(g_col, observed=True)['is_turn_L'].mean() * 100).round(1)
+        sum_df['우선회_비율'] = (filtered.groupby(g_col, observed=True)['is_turn_R'].mean() * 100).round(1)
         sum_df['직진_비율'] = (100 - sum_df['좌선회_비율'] - sum_df['우선회_비율']).round(1)
 
         # 마모지수 산출 (가중치 적용)
@@ -576,6 +568,9 @@ if uploaded_files:
 
                 #     st.pyplot(fig_rp, width="stretch")
                 #     plt.close(fig_rp)
+
+                del plot_data  # 루프 끝에 추가
+                gc.collect()
 
     with tab2:
         st.markdown("### 🔢 주행 그룹별 가혹도 및 거동 비율")
@@ -909,6 +904,8 @@ if uploaded_files:
                     result_df = pd.DataFrame(res_dict)
                     result_df = result_df.iloc[window_size - 1 : : step_size].dropna().reset_index(drop=True)
                     st.session_state.tab4_result = result_df
+                    del analysis_df, res_dict
+                    gc.collect()
 
                 st.success(f"✅ 분석 완료! (총 {len(result_df)}개의 데이터 포인트)")
 

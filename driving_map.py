@@ -1,8 +1,3 @@
-#!/usr/bin/env python
-# coding: utf-8
-
-# In[ ]:
-
 
 import os
 import streamlit as st
@@ -884,56 +879,87 @@ if uploaded_files:
                 with st.spinner("가혹도 통계량을 초고속 계산 중입니다..."):
                     # --- 1. 데이터 추출 및 필터 적용 (기존 유지) ---
                     analysis_df = df[['accXG', 'accYG', 'yawDps']].copy()
-
-                    # analysis_df['accXG(Filter)'] = analysis_df['accXG'].rolling(window=median_window, center=True).median().ffill().bfill()
-                    # analysis_df['accYG(Filter)'] = analysis_df['accYG'].rolling(window=median_window, center=True).median().ffill().bfill()
-                    # analysis_df['yawDps(Filter)'] = analysis_df['yawDps'].rolling(window=median_window, center=True).median().ffill().bfill()
                     analysis_df['accXG(Filter)'] = medfilt(analysis_df['accXG'].to_numpy(), kernel_size=median_window)
                     analysis_df['accYG(Filter)'] = medfilt(analysis_df['accYG'].to_numpy(), kernel_size=median_window)
                     analysis_df['yawDps(Filter)'] = medfilt(analysis_df['yawDps'].to_numpy(), kernel_size=median_window)
 
                     # --- 2. 윈도우별 통계량 계산 (★for 루프 제거, 100% 벡터화 연산) ---
-                    # 롤링 윈도우 설정
                     roller = analysis_df.rolling(window=window_size, center=False)
 
-                    # 각 지표별 통계량 한 번에 연산
                     res_dict = {}
                     for name in ['accXG', 'accYG', 'yawDps']:
                         f_col = f'{name}(Filter)'
                         res_dict[name] = analysis_df[name]
                         res_dict[f_col] = analysis_df[f_col]
 
-                        # RMS = sqrt( mean(x^2) )
+                        # RMS, STD, Jerk 연산 (X, Y, Yaw 3개 축 모두 생성됨)
                         res_dict[f'{name}(rms)'] = np.sqrt((analysis_df[f_col]**2).rolling(window=window_size).mean())
-                        # STD
                         res_dict[f'{name}(STD)'] = roller[f_col].std(ddof=0)
-                        # Jerk = Max(Abs(Diff)) / dt
                         res_dict[f'{name}(jerk)'] = analysis_df[f_col].diff().abs().rolling(window=window_size - 1).max() / dt
 
                     # 딕셔너리를 데이터프레임으로 변환
                     res_df = pd.DataFrame(res_dict)
                     res_df['speed'] = df['speed'].loc[res_df.index]
+                    res_df['date'] = df['dataTimeDate'].loc[res_df.index] # [추가] 일별 점수 집계를 위해 날짜 매핑
+
+                    metrics_cols = [
+                        'accXG(rms)', 'accXG(STD)', 'accXG(jerk)',
+                        'accYG(rms)', 'accYG(STD)', 'accYG(jerk)',
+                        'yawDps(rms)', 'yawDps(STD)', 'yawDps(jerk)'
+                    ]
+                    Q_MAX = {col: max(res_df[col].quantile(0.995), 0.001) for col in metrics_cols}
 
                     if 'speed' in df.columns:
                         res_df['speed_weight'] = res_df['speed'].apply(get_speed_weight)
                     else:
                         res_df['speed_weight'] = 1.0
 
-                    res_df['ISI_Base'] = (
-                        ((res_df['accXG(rms)'] / 2.0 + res_df['accXG(jerk)'] / 5.0) * 0.4) +
-                        ((res_df['accYG(rms)'] / 2.0 + res_df['yawDps(STD)'] / 50.0) * 0.4) +
-                        ((res_df['accYG(STD)'] / 1.0) * 0.2)
-                    ) * 100
+                    norm = {}
+                    for col, max_val in Q_MAX.items():
+                        norm[col] = (res_df[col] / max_val).clip(0, 1)
 
-                    # 최종 통합 지수 (0~100점 스케일)
+                    # 축별 가혹도 (RMS 15%, STD 35%, JERK 50%) * 100
+                    res_df['score_X'] = (norm['accXG(rms)'] * 0.15 + norm['accXG(STD)'] * 0.35 + norm['accXG(jerk)'] * 0.50) * 100
+                    res_df['score_Y'] = (norm['accYG(rms)'] * 0.15 + norm['accYG(STD)'] * 0.35 + norm['accYG(jerk)'] * 0.50) * 100
+                    res_df['score_Yaw'] = (norm['yawDps(rms)'] * 0.15 + norm['yawDps(STD)'] * 0.35 + norm['yawDps(jerk)'] * 0.50) * 100
+
+                    # 기존 가중치 체계를 새 수식(X: 35%, Y: 35%, Yaw: 30%)으로 완전 대체
+                    res_df['ISI_Base'] = res_df['score_X'] * 0.35 + res_df['score_Y'] * 0.35 + res_df['score_Yaw'] * 0.30
                     res_df['가혹도(ISI)'] = res_df['ISI_Base'] * res_df['speed_weight']
 
-                    # 테이블 저장
+                    # [접목 단계 3] 일별 시간당 가혹 데미지 밀도 및 최종 100점 만점 점수 산출
+                    daily_scores = []
+                    for date_val, group in res_df.groupby('date'):
+                        hours = len(group) / 7220.0 # 2Hz 데이터 기준 시간(Hour) 변환 계수
+                        harsh_events = group['가혹도(ISI)'][group['가혹도(ISI)'] > 30]
+
+                        if len(harsh_events) == 0:
+                            hourly_rate = 0
+                        else:
+                            hourly_rate = (harsh_events - 30).sum() / hours
+
+                        # 최종 100점 만점 변환 (계수 0.0020 적용)
+                        final_score = max(0, min(100, 100 - (hourly_rate * 0.0020)))
+                        daily_scores.append({
+                            'date': date_val,
+                            '최종운전점수': round(final_score, 1)
+                        })
+
+                    # 일별 점수 데이터프레임 생성
+                    daily_score_df = pd.DataFrame(daily_scores)
+
+                    # step_size 간격으로 자르기 전 원본 날짜를 이미 매핑했으므로 iloc 연산이 간소화됩니다.
                     result_df = res_df.iloc[window_size - 1 : : step_size].dropna().reset_index(drop=True)
-                    result_df['date'] = df['dataTimeDate'].iloc[window_size - 1 : : step_size].values
+
+                    # 일별 계산된 최종 100점 점수를 테이블에 결합 (대시보드 표출용)
+                    result_df = result_df.merge(daily_score_df, on='date', how='left')
                     st.session_state.tab4_result = result_df
 
-                    del analysis_df, res_dict
+                    # Streamlit 화면에 일별 최종 점수를 요약 브리핑해줍니다.
+                    st.write("#### 📅 일별 최종 운전 스코어 (100점 만점)")
+                    st.dataframe(daily_score_df)
+
+                    del analysis_df, res_dict, daily_scores
                     gc.collect()
 
                 st.success(f"✅ 분석 완료! (총 {len(result_df)}개의 데이터 포인트)")
@@ -942,42 +968,30 @@ if uploaded_files:
             if 'tab4_result' in st.session_state:
                 res = st.session_state.tab4_result
 
-                c1, c2, c3 = st.columns(3)
-                with c1:
-                    # 0 ~ 1.0 사이의 값으로 조절 (평균 가중치)
-                    avg_weight = st.slider("평균 가혹도 가중치", 0.0, 1.0, 0.7, 0.1)
-                with c2:
-                    # 나머지는 자동으로 피크 가중치로 계산
-                    peak_weight = round(1.0 - avg_weight, 1)
-                    st.metric("피크 가혹도 가중치", f"{peak_weight:.1f}")
-
                 st.subheader("📈 가혹도 분석 결과 테이블")
                 st.dataframe(res, width="stretch", height=400)
 
-                # 1. 일별 요약 (groupby 활용)
-                daily_summary = res.groupby('date')['가혹도(ISI)'].agg([lambda x: x.quantile(0.5), lambda x: x.quantile(0.99)])
-                daily_summary.columns = ['avg_sev', 'peak_sev']
-                daily_summary['daily_score'] = (
-                    100 - (daily_summary['avg_sev'] * avg_weight + daily_summary['peak_sev'] * peak_weight)
-                ).clip(0, 100)
+                daily_summary = res[['date', '최종운전점수']].drop_duplicates().sort_values('date')
 
-                # 2. 월간 최종 점수
-                monthly_score = daily_summary['daily_score'].mean()
+                # 종합 점수 계산 (v2 일별 최종 점수들의 평균값 산출)
+                monthly_score = daily_summary['최종운전점수'].mean()
 
-                # 3. 화면 표시
+                # 리포트 메트릭 화면 표시
                 st.subheader("🏆 운전 점수 리포트")
                 c1, c2 = st.columns(2)
                 c1.metric("종합 점수", f"{monthly_score:.1f}점")
-                c2.metric("최근 점수", f"{daily_summary['daily_score'].iloc[-1]:.1f}점")
+                c2.metric("최근 점수", f"{daily_summary['최종운전점수'].iloc[-1]:.1f}점")
 
-                summary_plot = daily_summary.reset_index()
+                # 시각화 데이터 생성 및 라인 차트 렌더링
+                summary_plot = daily_summary.copy()
                 summary_plot['date_str'] = pd.to_datetime(summary_plot['date']).dt.strftime('%Y-%m-%d')
+
                 chart = alt.Chart(summary_plot).mark_line(
-                    point=True  # 표식(Point) 추가
+                    point=True
                 ).encode(
-                    x=alt.X('date_str:O', title='날짜'), # O는 순서형(Ordinal)을 의미
-                    y=alt.Y('daily_score:Q', scale=alt.Scale(domain=[0, 100]), title='운전 점수'), # Q는 양적(Quantitative)
-                    tooltip=['date_str', 'daily_score'] # 마우스 올렸을 때 정보 표시
+                    x=alt.X('date_str:O', title='날짜'),
+                    y=alt.Y('최종운전점수:Q', scale=alt.Scale(domain=[0, 100]), title='운전 점수'),
+                    tooltip=['date_str', '최종운전점수']
                 ).properties(
                     width='container',
                     height=300
@@ -1225,10 +1239,3 @@ if uploaded_files:
     #         plt.close(fig)
 else:
     st.info("👈 데이터를 업로드해주세요.")
-
-
-# In[ ]:
-
-
-
-

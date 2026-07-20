@@ -4,6 +4,7 @@
 # In[ ]:
 
 
+import os
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -21,7 +22,7 @@ from scipy.signal import medfilt
 import gc
 from ui_components import render_tire_gain_inputs, render_wear_comparison_chart
 import logging
-import traceback
+import altair as alt
 
 plt.close('all')
 gc.collect()
@@ -75,6 +76,12 @@ if selected_case == "Case 1":
     st.caption("✅ **정방향 상태**: 안테나가 차량 후면을 향하고 있습니다. (IMU 데이터 보정 없음)")
 else:
     st.caption("🔄 **180도 회전 상태**: 안테나가 전면 유리를 향하고 있습니다. (IMU 데이터 반전 적용)")
+
+def get_speed_weight(speed):
+    if speed <= 30: return 1.0
+    elif speed <= 80: return 1.2
+    elif speed <= 120: return 1.5
+    else: return 2.0
 
 # --- 1. 데이터 로드 및 전처리 (캐싱 최적화) ---
 def load_data(file):
@@ -291,6 +298,7 @@ def get_integrated_data(_files, file_keys):  # _files: 실제 파일 객체 (캐
     progress_bar.empty()
     return raw_df
 
+
 if uploaded_files:
     with st.status("데이터 통합 및 전처리 중...", expanded=True) as status:
         # 캐싱된 통합 함수 호출
@@ -398,8 +406,8 @@ if uploaded_files:
     turn_threshold = hard_turn_threshold
 
     # --- 4. 메인 분석 화면 ---
-    tab1, tab2, tab3, tab4 = st.tabs(["📈 시각화 분석", "🔢 데이터 통계", "🛞 마모 인자 분석", "💥 운전 가혹도 분석"])
-    # tab1, tab2, tab3, tab4, tab5 = st.tabs(["📈 시각화 분석", "🔢 데이터 통계", "🛞 마모 인자 분석", "💥 운전 가혹도 분석", "타이어 마모 예측"])
+    # tab1, tab2, tab3, tab4 = st.tabs(["📈 시각화 분석", "🔢 데이터 통계", "🛞 마모 인자 분석", "💥 운전 가혹도 분석"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📈 시각화 분석", "🔢 데이터 통계", "🛞 마모 인자 분석", "💥 운전 가혹도 분석", "타이어 마모 예측"])
 
     with tab1:
         for item in group_list:
@@ -860,13 +868,15 @@ if uploaded_files:
         else:
             c1, c2, c3 = st.columns(3)
             with c1:
-                median_window = st.number_input("Median 필터 윈도우 (홀수)", min_value=3, max_value=51, value=9, step=2)
+                median_window = st.number_input("Median 필터 윈도우 (홀수)", min_value=1, max_value=51, value=9, step=2)
             with c2:
                 step_size = st.number_input("분석 간격 (Step Size)", min_value=1, max_value=100, value=2)
             with c3:
-                window_size = st.number_input("통계 계산 윈도우 크기", min_value=3, max_value=100, value=9)
+                window_size = st.number_input("통계 계산 윈도우 크기", min_value=1, max_value=100, value=9)
 
             dt = 0.5  # 2Hz 고정
+            if 'dataTimeDate' not in df.columns:
+                df['dataTimeDate'] = pd.to_datetime(df['dataTime']).dt.date
 
             run_analysis = st.button("🚀 분석 실행")
 
@@ -901,36 +911,193 @@ if uploaded_files:
                         res_dict[f'{name}(jerk)'] = analysis_df[f_col].diff().abs().rolling(window=window_size - 1).max() / dt
 
                     # 딕셔너리를 데이터프레임으로 변환
-                    result_df = pd.DataFrame(res_dict)
-                    result_df = result_df.iloc[window_size - 1 : : step_size].dropna().reset_index(drop=True)
+                    res_df = pd.DataFrame(res_dict)
+                    res_df['speed'] = df['speed'].loc[res_df.index]
+
+                    if 'speed' in df.columns:
+                        res_df['speed_weight'] = res_df['speed'].apply(get_speed_weight)
+                    else:
+                        res_df['speed_weight'] = 1.0
+
+                    res_df['ISI_Base'] = (
+                        ((res_df['accXG(rms)'] / 2.0 + res_df['accXG(jerk)'] / 5.0) * 0.4) +
+                        ((res_df['accYG(rms)'] / 2.0 + res_df['yawDps(STD)'] / 50.0) * 0.4) +
+                        ((res_df['accYG(STD)'] / 1.0) * 0.2)
+                    ) * 100
+
+                    # 최종 통합 지수 (0~100점 스케일)
+                    res_df['가혹도(ISI)'] = res_df['ISI_Base'] * res_df['speed_weight']
+
+                    # 테이블 저장
+                    result_df = res_df.iloc[window_size - 1 : : step_size].dropna().reset_index(drop=True)
+                    result_df['date'] = df['dataTimeDate'].iloc[window_size - 1 : : step_size].values
                     st.session_state.tab4_result = result_df
+
                     del analysis_df, res_dict
                     gc.collect()
 
                 st.success(f"✅ 분석 완료! (총 {len(result_df)}개의 데이터 포인트)")
 
-                # --- 3. 출력 및 시각화 ---
+            # --- 3. 출력 및 시각화 ---
             if 'tab4_result' in st.session_state:
+                res = st.session_state.tab4_result
+
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    # 0 ~ 1.0 사이의 값으로 조절 (평균 가중치)
+                    avg_weight = st.slider("평균 가혹도 가중치", 0.0, 1.0, 0.7, 0.1)
+                with c2:
+                    # 나머지는 자동으로 피크 가중치로 계산
+                    peak_weight = round(1.0 - avg_weight, 1)
+                    st.metric("피크 가혹도 가중치", f"{peak_weight:.1f}")
+
                 st.subheader("📈 가혹도 분석 결과 테이블")
-                st.dataframe(st.session_state.tab4_result, width="stretch", height=400)
+                st.dataframe(res, width="stretch", height=400)
 
-                # st.divider()
-                # st.subheader("📉 주요 지표 시계열 확인")
+                # 1. 일별 요약 (groupby 활용)
+                daily_summary = res.groupby('date')['가혹도(ISI)'].agg([lambda x: x.quantile(0.5), lambda x: x.quantile(0.99)])
+                daily_summary.columns = ['avg_sev', 'peak_sev']
+                daily_summary['daily_score'] = (
+                    100 - (daily_summary['avg_sev'] * avg_weight + daily_summary['peak_sev'] * peak_weight)
+                ).clip(0, 100)
 
-                # # 리소스 최적화: 데이터가 너무 많으면 1000개 포인트로 샘플링하여 그래프 표시
-                # display_df = result_df.copy()
-                # if len(display_df) > 1000:
-                #     st.warning("⚠️ 데이터가 많아 그래프 시각화를 위해 1,000개 포인트로 샘플링합니다.")
-                #     sample_step = len(display_df) // 1000
-                #     display_df = display_df.iloc[::sample_step]
+                # 2. 월간 최종 점수
+                monthly_score = daily_summary['daily_score'].mean()
 
-                # target_metric = st.selectbox("확인할 지표를 선택하세요", ['rms', 'STD', 'jerk'])
-                # fig_cols = [f'accXG({target_metric})', f'accYG({target_metric})', f'yawDps({target_metric})']
+                # 3. 화면 표시
+                st.subheader("🏆 운전 점수 리포트")
+                c1, c2 = st.columns(2)
+                c1.metric("종합 점수", f"{monthly_score:.1f}점")
+                c2.metric("최근 점수", f"{daily_summary['daily_score'].iloc[-1]:.1f}점")
 
-                # st.line_chart(display_df[fig_cols])
+                summary_plot = daily_summary.reset_index()
+                summary_plot['date_str'] = pd.to_datetime(summary_plot['date']).dt.strftime('%Y-%m-%d')
+                chart = alt.Chart(summary_plot).mark_line(
+                    point=True  # 표식(Point) 추가
+                ).encode(
+                    x=alt.X('date_str:O', title='날짜'), # O는 순서형(Ordinal)을 의미
+                    y=alt.Y('daily_score:Q', scale=alt.Scale(domain=[0, 100]), title='운전 점수'), # Q는 양적(Quantitative)
+                    tooltip=['date_str', 'daily_score'] # 마우스 올렸을 때 정보 표시
+                ).properties(
+                    width='container',
+                    height=300
+                )
 
-    # with tab5:
-    #     st.write("### 📏 실측 기반 타이어 마모 수명 예측")
+                # 3. Streamlit에 출력
+                st.altair_chart(chart)
+    with tab5:
+        st.write("### 🛞 타이어 상태 분석 (온도 및 공기압)")
+        try:
+            if os.path.exists('device_list.csv'):
+                device_df = pd.read_csv('device_list.csv', sep='\t')
+                device_df.columns = device_df.columns.str.strip()
+                pos_map = {1: 'FL', 2: 'FR', 3: 'RL', 4: 'RR'}
+                device_df['Position'] = device_df['타이어 위치'].map(pos_map)
+
+                # [최적화 1] lambda 대신 사용할 1차원 딕셔너리 사전 생성 (속도 10배 이상 향상)
+                sensor_to_info = device_df.set_index('SENSOR_ID').to_dict('index')
+                sn_map = {k: v['무선통신기_SN'] for k, v in sensor_to_info.items()}
+                pos_map_dict = {k: v['Position'] for k, v in sensor_to_info.items()}
+                valid_sensors = set(sensor_to_info.keys()) # isin 검색용 set (매우 빠름)
+            else:
+                st.error("device_list.csv 파일을 찾을 수 없습니다.")
+                st.stop()
+        except Exception as e:
+            st.error(f"장비 리스트 로드 오류: {e}")
+            st.stop()
+
+        if not uploaded_files:
+            st.warning("분석할 데이터가 없습니다.")
+        else:
+            with st.spinner("데이터 처리 중..."):
+                try:
+                    # 1. 파일별 타이어 데이터 읽기
+                    tire_dfs = []
+                    target_cols = ['dataTime', 'sensorId', 'pressure', 'temperature', 'loadEstimation', 'wearEstimation']
+
+                    for file in uploaded_files:
+                        file.seek(0)
+                        df_t = pd.read_excel(file, sheet_name='PacketBodyTire', engine='calamine', usecols=lambda c: c in target_cols)
+                        df_t = df_t[(df_t['loadEstimation'] > 0) & (df_t['wearEstimation'] > 0)]
+                        tire_dfs.append(df_t)
+
+                    tire_df = pd.concat(tire_dfs, ignore_index=True)
+
+                    tire_df = tire_df[tire_df['sensorId'].isin(valid_sensors)].copy()
+                    tire_df['SN'] = tire_df['sensorId'].map(sn_map)
+                    tire_df['Position'] = tire_df['sensorId'].map(pos_map_dict)
+
+                    tire_df['dataTime'] = pd.to_datetime(tire_df['dataTime'])
+                    tire_df = tire_df.sort_values('dataTime')
+
+                    # 2. 주행 데이터도 정렬
+                    df_speed = raw_df[['dataTime', 'speed']].copy()
+                    df_speed['dataTime'] = pd.to_datetime(df_speed['dataTime'])
+                    df_speed = df_speed.sort_values('dataTime')
+
+                    # 3. merge_asof 사용 (가장 가까운 과거의 속도 매칭)
+                    matched_df = pd.merge_asof(tire_df, df_speed, on='dataTime', direction='nearest')
+
+                    fz_apatch_gain = 1
+                    fz_speed_gain = 1.97
+                    fz_gain_1 = 9.1497
+                    fz_gain_2 = -1520.6
+
+                    # matched_df['calculated_load'] = (((matched_df['loadEstimation'] * 1000) ** fz_apatch_gain) * (matched_df['pressure']) / (matched_df['speed'] ** fz_speed_gain)) * fz_gain_1 + fz_gain_2
+                    matched_df['Apatch_Z'] = (matched_df['loadEstimation'] * 1000)
+                    matched_df['Apatch_X'] = (matched_df['wearEstimation'] * 1000)
+
+                    st.dataframe(matched_df.head(100))
+                    st.subheader("📊 타이어 위치별 APATCH")
+
+                    melted_df = matched_df.melt(
+                        id_vars=['dataTime', 'Position'],
+                        value_vars=['Apatch_X', 'Apatch_Z'],
+                        var_name='Metric',
+                        value_name='Value'
+                    )
+
+                    positions = ['FL', 'FR', 'RL', 'RR']
+                    cols = st.columns(2)
+
+                    color_scale = alt.Scale(
+                        domain=['Apatch_X', 'Apatch_Z'],
+                        range=['#72BCEE', "#3962E9"]
+                    )
+
+                    for i, pos in enumerate(positions):
+                        # 해당 위치의 데이터만 필터링
+                        pos_data = melted_df[melted_df['Position'] == pos]
+
+                        if not pos_data.empty:
+                            # 2열 레이아웃을 위해 index 계산
+                            # daily_avg = pos_data.resample('D', on='dataTime')[['Apatch_X', 'Apatch_Z']].mean().reset_index()
+                            # 결측치 보간 (선 연결)
+                            # daily_avg = daily_avg.interpolate(method='linear').reset_index()
+                            col = cols[i % 2]
+
+                            with col:
+                                st.write(f"#### 타이어 위치: {pos}")
+
+                                points = alt.Chart(pos_data).mark_circle(opacity=1, size=50, clip=False).encode(
+                                    x=alt.X('dataTime:T', axis=alt.Axis(format='%m-%d', labelAngle=0),
+                                            scale=alt.Scale(padding=10),
+                                            title='날짜'),
+                                    y=alt.Y('Value:Q', scale=alt.Scale(domain=[0, 50000])),
+                                    color=alt.Color('Metric:N', scale=color_scale),
+                                    tooltip=['dataTime', 'Metric', 'Value']
+                                )
+
+                                trendline = points.transform_regression(
+                                    'dataTime', 'Value', groupby=['Metric']
+                                ).mark_line(strokeDash=[5, 5], clip=False)
+
+                                chart = (points + trendline).properties(height=300).configure_view(strokeWidth=0).interactive()
+                                st.altair_chart(chart, width='stretch')
+
+                except Exception as e:
+                    st.error(f"데이터 처리 오류: {e}")
+
 
     #     # [내부 함수 정의]
     #     def predict_wear_by_imu(mileage, pos, wear_idx, start_depth=8.0, start_mileage=0):

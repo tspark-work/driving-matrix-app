@@ -866,34 +866,35 @@ if uploaded_files:
         if df.empty:
             st.warning("분석할 데이터가 없습니다. 먼저 파일을 업로드해주세요.")
         else:
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                median_window = st.number_input("Median 필터 윈도우 (홀수)", min_value=1, max_value=51, value=9, step=2)
-            with c2:
-                step_size = st.number_input("분석 간격 (Step Size)", min_value=1, max_value=100, value=2)
-            with c3:
-                window_size = st.number_input("통계 계산 윈도우 크기", min_value=1, max_value=100, value=9)
-
-            with st.expander("⚙️ 가중치 및 최종 점수 세부 파라미터 설정 (클릭하여 열기)", expanded=True):
-                st.markdown("##### 1️⃣ 지표별 가중치")
-                wx_col, wy_col, wyaw_col = st.columns(3)
-                with wx_col:
-                    w_x = st.number_input("X축 (가감속) 가중치", min_value=0.0, max_value=1.0, value=0.50, step=0.05)
-                with wy_col:
-                    w_y = st.number_input("Y축 (선회) 가중치", min_value=0.0, max_value=1.0, value=0.30, step=0.05)
-                with wyaw_col:
-                    w_yaw = st.number_input("Yaw축 (회전각속도) 가중치", min_value=0.0, max_value=1.0, value=0.20, step=0.05)
-
-                st.markdown("##### 2️⃣ 최종 100점 변환 파라미터")
-                penalty_factor = st.number_input("최종 감점 계수 (Scale Factor)", min_value=0.00001, max_value=0.01000, value=0.00038, step=0.00001, format="%.5f")
-
             dt = 0.5  # 2Hz 고정
             if 'dataTimeDate' not in df.columns:
                 df['dataTimeDate'] = pd.to_datetime(df['dataTime']).dt.date
 
-            run_analysis = st.button("🚀 분석 실행")
+            with st.form("severity_analysis_form"):
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    median_window = st.number_input("Median 필터 윈도우 (홀수)", min_value=1, max_value=51, value=9, step=2)
+                with c2:
+                    step_size = st.number_input("분석 간격 (Step Size)", min_value=1, max_value=100, value=2)
+                with c3:
+                    window_size = st.number_input("통계 계산 윈도우 크기", min_value=1, max_value=100, value=9)
 
-            if run_analysis:
+                with st.expander("⚙️ 가중치 및 최종 점수 세부 파라미터 설정 (클릭하여 열기)", expanded=True):
+                    st.markdown("##### 1️⃣ 지표별 가중치 (합계 = 1.0 권장)")
+                    wx_col, wy_col, wyaw_col = st.columns(3)
+                    with wx_col:
+                        w_x = st.number_input("X축 (가감속) 가중치", min_value=0.0, max_value=1.0, value=0.50, step=0.05)
+                    with wy_col:
+                        w_y = st.number_input("Y축 (선회) 가중치", min_value=0.0, max_value=1.0, value=0.30, step=0.05)
+                    with wyaw_col:
+                        w_yaw = st.number_input("Yaw축 (회전각속도) 가중치", min_value=0.0, max_value=1.0, value=0.20, step=0.05)
+
+                    st.markdown("##### 2️⃣ 최종 100점 변환 파라미터")
+                    penalty_factor = st.number_input("최종 감점 계수 (Scale Factor)", min_value=0.00001, max_value=0.01000, value=0.00038, step=0.00001, format="%.5f")
+
+                    submitted = st.form_submit_button("🚀 분석 실행", type="primary")
+
+            if submitted:
                 with st.spinner("가혹도 통계량을 초고속 계산 중입니다..."):
                     # --- 1. 데이터 추출 및 필터 적용 (기존 유지) ---
                     analysis_df = df[['accXG', 'accYG', 'yawDps']].copy()

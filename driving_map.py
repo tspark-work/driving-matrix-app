@@ -880,7 +880,7 @@ if uploaded_files:
                     window_size = st.number_input("통계 계산 윈도우 크기", min_value=1, max_value=100, value=9)
 
                 with st.expander("⚙️ 가중치 및 최종 점수 세부 파라미터 설정 (클릭하여 열기)", expanded=True):
-                    st.markdown("##### 1️⃣ 지표별 가중치 (합계 = 1.0 권장)")
+                    st.markdown("##### 1️⃣ 축별 가중치 (합계 = 1.0 권장)")
                     wx_col, wy_col, wyaw_col = st.columns(3)
                     with wx_col:
                         w_x = st.number_input("X축 (가감속) 가중치", min_value=0.0, max_value=1.0, value=0.50, step=0.05)
@@ -889,7 +889,16 @@ if uploaded_files:
                     with wyaw_col:
                         w_yaw = st.number_input("Yaw축 (회전각속도) 가중치", min_value=0.0, max_value=1.0, value=0.20, step=0.05)
 
-                    st.markdown("##### 2️⃣ 최종 100점 변환 파라미터")
+                    st.markdown("##### 2️⃣ 지표별 가중치 (RMS / STD / Jerk)")
+                    wrms_col, wstd_col, wjerk_col = st.columns(3)
+                    with wrms_col:
+                        w_rms = st.number_input("RMS 가중치", min_value=0.0, max_value=1.0, value=0.10, step=0.05)
+                    with wstd_col:
+                        w_std = st.number_input("STD 가중치", min_value=0.0, max_value=1.0, value=0.40, step=0.05)
+                    with wjerk_col:
+                        w_jerk = st.number_input("Jerk 가중치", min_value=0.0, max_value=1.0, value=0.50, step=0.05)
+
+                    st.markdown("##### 3️⃣ 최종 100점 변환 파라미터")
                     penalty_factor = st.number_input("최종 감점 계수 (Scale Factor)", min_value=0.00001, max_value=0.01000, value=0.00038, step=0.00001, format="%.5f")
 
                     submitted = st.form_submit_button("🚀 분석 실행", type="primary")
@@ -937,10 +946,10 @@ if uploaded_files:
                     for col, max_val in Q_MAX.items():
                         norm[col] = (res_df[col] / max_val).clip(0, 1)
 
-                    # 축별 가혹도 (RMS 15%, STD 35%, JERK 50%) * 100
-                    res_df['score_X'] = (norm['accXG(rms)'] * 0.15 + norm['accXG(STD)'] * 0.35 + norm['accXG(jerk)'] * 0.50) * 100
-                    res_df['score_Y'] = (norm['accYG(rms)'] * 0.15 + norm['accYG(STD)'] * 0.35 + norm['accYG(jerk)'] * 0.50) * 100
-                    res_df['score_Yaw'] = (norm['yawDps(rms)'] * 0.15 + norm['yawDps(STD)'] * 0.35 + norm['yawDps(jerk)'] * 0.50) * 100
+                    # 축별 가혹도 (RMS 10%, STD 40%, JERK 50%) * 100
+                    res_df['score_X'] = (norm['accXG(rms)'] * w_rms + norm['accXG(STD)'] * w_std + norm['accXG(jerk)'] * w_jerk) * 100
+                    res_df['score_Y'] = (norm['accYG(rms)'] * w_rms + norm['accYG(STD)'] * w_std + norm['accYG(jerk)'] * w_jerk) * 100
+                    res_df['score_Yaw'] = (norm['yawDps(rms)'] * w_rms + norm['yawDps(STD)'] * w_std + norm['yawDps(jerk)'] * w_jerk) * 100
 
                     # 기존 가중치 체계를 새 수식(X: 35%, Y: 35%, Yaw: 30%)으로 완전 대체
                     res_df['ISI_Base'] = res_df['score_X'] * w_x + res_df['score_Y'] * w_y + res_df['score_Yaw'] * w_yaw
@@ -950,12 +959,12 @@ if uploaded_files:
                     daily_scores = []
                     for date_val, group in res_df.groupby('date'):
                         hours = len(group) / 7220.0 # 2Hz 데이터 기준 시간(Hour) 변환 계수
-                        harsh_events = group['가혹도(ISI)'][group['가혹도(ISI)'] > 30]
+                        harsh_events = group['가혹도(ISI)'][group['가혹도(ISI)'] > 25] - 25
 
                         if len(harsh_events) == 0:
                             hourly_rate = 0
                         else:
-                            hourly_rate = (harsh_events - 30).sum() / hours
+                            hourly_rate = (harsh_events ** 1.3).sum() / hours
 
                         # 최종 100점 만점 변환 (계수 적용)
                         final_score = max(0, min(100, 100 - (hourly_rate * penalty_factor)))

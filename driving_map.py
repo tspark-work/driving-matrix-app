@@ -976,16 +976,13 @@ if uploaded_files:
                     # 일별 점수 데이터프레임 생성
                     daily_score_df = pd.DataFrame(daily_scores)
 
-                    # step_size 간격으로 자르기 전 원본 날짜를 이미 매핑했으므로 iloc 연산이 간소화됩니다.
+                    # 데이터 다운샘플링 및 최종 저장
                     result_df = res_df.iloc[window_size - 1 : : step_size].dropna().reset_index(drop=True)
-
-                    # 일별 계산된 최종 100점 점수를 테이블에 결합 (대시보드 표출용)
                     result_df = result_df.merge(daily_score_df, on='date', how='left')
-                    st.session_state.tab4_result = result_df
 
-                    # Streamlit 화면에 일별 최종 점수를 요약 브리핑해줍니다.
-                    st.write("#### 📅 일별 최종 운전 스코어 (100점 만점)")
-                    st.dataframe(daily_score_df)
+                    # 세션 상태에 새로 계산된 결과 저장
+                    st.session_state.tab4_result = result_df
+                    st.session_state.daily_score_df = daily_score_df
 
                     del analysis_df, res_dict, daily_scores
                     gc.collect()
@@ -996,12 +993,14 @@ if uploaded_files:
             if 'tab4_result' in st.session_state:
                 res = st.session_state.tab4_result
 
+                if 'daily_score_df' in st.session_state:
+                    st.write("#### 📅 일별 최종 운전 스코어 (100점 만점)")
+                    st.dataframe(st.session_state.daily_score_df)
+
                 st.subheader("📈 가혹도 분석 결과 테이블")
                 st.dataframe(res, width="stretch", height=400)
 
                 daily_summary = res[['date', '최종운전점수']].drop_duplicates().sort_values('date')
-
-                # 종합 점수 계산 (v2 일별 최종 점수들의 평균값 산출)
                 monthly_score = daily_summary['최종운전점수'].mean()
 
                 # 리포트 메트릭 화면 표시

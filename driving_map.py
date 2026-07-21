@@ -1,3 +1,8 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# In[ ]:
+
 
 import os
 import streamlit as st
@@ -869,6 +874,19 @@ if uploaded_files:
             with c3:
                 window_size = st.number_input("통계 계산 윈도우 크기", min_value=1, max_value=100, value=9)
 
+            with st.expander("⚙️ 가중치 및 최종 점수 세부 파라미터 설정 (클릭하여 열기)", expanded=True):
+                st.markdown("##### 1️⃣ 지표별 가중치")
+                wx_col, wy_col, wyaw_col = st.columns(3)
+                with wx_col:
+                    w_x = st.number_input("X축 (가감속) 가중치", min_value=0.0, max_value=1.0, value=0.50, step=0.05)
+                with wy_col:
+                    w_y = st.number_input("Y축 (선회) 가중치", min_value=0.0, max_value=1.0, value=0.30, step=0.05)
+                with wyaw_col:
+                    w_yaw = st.number_input("Yaw축 (회전각속도) 가중치", min_value=0.0, max_value=1.0, value=0.20, step=0.05)
+
+                st.markdown("##### 2️⃣ 최종 100점 변환 파라미터")
+                penalty_factor = st.number_input("최종 감점 계수 (Scale Factor)", min_value=0.00001, max_value=0.01000, value=0.00038, step=0.00001, format="%.5f")
+
             dt = 0.5  # 2Hz 고정
             if 'dataTimeDate' not in df.columns:
                 df['dataTimeDate'] = pd.to_datetime(df['dataTime']).dt.date
@@ -924,7 +942,7 @@ if uploaded_files:
                     res_df['score_Yaw'] = (norm['yawDps(rms)'] * 0.15 + norm['yawDps(STD)'] * 0.35 + norm['yawDps(jerk)'] * 0.50) * 100
 
                     # 기존 가중치 체계를 새 수식(X: 35%, Y: 35%, Yaw: 30%)으로 완전 대체
-                    res_df['ISI_Base'] = res_df['score_X'] * 0.35 + res_df['score_Y'] * 0.35 + res_df['score_Yaw'] * 0.30
+                    res_df['ISI_Base'] = res_df['score_X'] * w_x + res_df['score_Y'] * w_y + res_df['score_Yaw'] * w_yaw
                     res_df['가혹도(ISI)'] = res_df['ISI_Base'] * res_df['speed_weight']
 
                     # [접목 단계 3] 일별 시간당 가혹 데미지 밀도 및 최종 100점 만점 점수 산출
@@ -938,8 +956,8 @@ if uploaded_files:
                         else:
                             hourly_rate = (harsh_events - 30).sum() / hours
 
-                        # 최종 100점 만점 변환 (계수 0.0020 적용)
-                        final_score = max(0, min(100, 100 - (hourly_rate * 0.0020)))
+                        # 최종 100점 만점 변환 (계수 적용)
+                        final_score = max(0, min(100, 100 - (hourly_rate * penalty_factor)))
                         daily_scores.append({
                             'date': date_val,
                             '최종운전점수': round(final_score, 1)
@@ -1239,3 +1257,10 @@ if uploaded_files:
     #         plt.close(fig)
 else:
     st.info("👈 데이터를 업로드해주세요.")
+
+
+# In[ ]:
+
+
+
+

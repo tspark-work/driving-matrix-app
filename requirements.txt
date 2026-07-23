@@ -5,5 +5,6 @@ matplotlib
 seaborn
 scipy
 plotly
-openpyxl
+altair
 python-calamine
+pyarrow
